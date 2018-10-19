@@ -135,13 +135,13 @@ func connectToServer() int { //connection net.Conn {
 			sendPacket(connection, 3, []byte{1, 2, 3, 4, 5})
 		})
 
-		obj, err = builder.GetObject("SignIn")
+		obj, err = builder.GetObject("SignUp")
 		if err != nil {
 			log.Fatal("Error:", err)
 			return 3
 		}
 		SignUpBtn := obj.(*gtk.Button)
-		SignUpBtn.Connect("button-release-event", func() {
+		SignUpBtn.Connect("clicked", func() {
 			sendPacket(connection, 3, []byte{1, 2, 3, 4, 5})
 		})
 
