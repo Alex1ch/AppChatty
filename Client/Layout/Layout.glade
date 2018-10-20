@@ -31,7 +31,7 @@
             <property name="left_attach">4</property>
             <property name="top_attach">1</property>
             <property name="width">10</property>
-            <property name="height">10</property>
+            <property name="height">7</property>
           </packing>
         </child>
         <child>
@@ -49,7 +49,7 @@
           </object>
           <packing>
             <property name="left_attach">13</property>
-            <property name="top_attach">11</property>
+            <property name="top_attach">8</property>
           </packing>
         </child>
         <child>
@@ -66,7 +66,7 @@
           </object>
           <packing>
             <property name="left_attach">12</property>
-            <property name="top_attach">11</property>
+            <property name="top_attach">8</property>
           </packing>
         </child>
         <child>
@@ -85,7 +85,7 @@
             <property name="left_attach">0</property>
             <property name="top_attach">0</property>
             <property name="width">4</property>
-            <property name="height">12</property>
+            <property name="height">9</property>
           </packing>
         </child>
         <child>
@@ -107,7 +107,7 @@
           </object>
           <packing>
             <property name="left_attach">4</property>
-            <property name="top_attach">11</property>
+            <property name="top_attach">8</property>
             <property name="width">7</property>
           </packing>
         </child>
@@ -142,7 +142,7 @@
           </object>
           <packing>
             <property name="left_attach">11</property>
-            <property name="top_attach">11</property>
+            <property name="top_attach">8</property>
           </packing>
         </child>
         <child>
@@ -159,10 +159,34 @@
           </packing>
         </child>
         <child>
-          <placeholder/>
+          <object class="GtkImage" id="OnlineIcon">
+            <property name="visible">True</property>
+            <property name="can_focus">False</property>
+            <property name="pixel_size">55</property>
+            <property name="icon_name">network-offline</property>
+          </object>
+          <packing>
+            <property name="left_attach">4</property>
+            <property name="top_attach">0</property>
+          </packing>
         </child>
         <child>
-          <placeholder/>
+          <object class="GtkEventBox" id="ReconnectEvt">
+            <property name="visible">True</property>
+            <property name="can_focus">False</property>
+            <child>
+              <object class="GtkImage" id="ReconnectIcon">
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <property name="pixel_size">57</property>
+                <property name="icon_name">media-playlist-repeat</property>
+              </object>
+            </child>
+          </object>
+          <packing>
+            <property name="left_attach">5</property>
+            <property name="top_attach">0</property>
+          </packing>
         </child>
         <child>
           <placeholder/>
@@ -191,7 +215,11 @@
   <object class="GtkWindow" id="Auth">
     <property name="can_focus">False</property>
     <property name="default_height">1</property>
+    <property name="decorated">False</property>
     <property name="transient_for">Main_window</property>
+    <child>
+      <placeholder/>
+    </child>
     <child>
       <object class="GtkGrid">
         <property name="visible">True</property>
@@ -264,8 +292,8 @@
           </object>
           <packing>
             <property name="left_attach">9</property>
-            <property name="top_attach">0</property>
-            <property name="height">14</property>
+            <property name="top_attach">3</property>
+            <property name="height">11</property>
           </packing>
         </child>
         <child>
@@ -295,6 +323,22 @@
             <property name="width">6</property>
             <property name="height">2</property>
           </packing>
+        </child>
+        <child>
+          <object class="GtkButton" id="CloseAuth">
+            <property name="label" translatable="yes">x</property>
+            <property name="visible">True</property>
+            <property name="can_focus">True</property>
+            <property name="receives_default">True</property>
+          </object>
+          <packing>
+            <property name="left_attach">9</property>
+            <property name="top_attach">0</property>
+            <property name="height">2</property>
+          </packing>
+        </child>
+        <child>
+          <placeholder/>
         </child>
         <child>
           <placeholder/>
