@@ -1,5 +1,5 @@
 # AppChatty
-Chat for DS/SNE
+Chat for DS Lab (SNE)
 
 ## Technology stack:
 - Golang
