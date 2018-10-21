@@ -20,14 +20,22 @@ const (
 var users map[string]net.Conn
 
 func handleNextPacket(client net.Conn) {
-	// Check
+	var (
+		exitCode int
+		recLen   uint32
+		opCode   uint16
+		buffer   []byte
+	)
 
-	exitCode, recLen, opCode, buffer := readPacket(client, 0)
-	fmt.Println(exitCode, recLen, opCode, buffer)
-	if recLen == 0 {
-		return
+	for {
+		exitCode, recLen, opCode, buffer = readPacket(client, 0)
+		fmt.Println(exitCode, recLen, opCode, buffer)
+		switch opCode {
+		case 1:
+
+		default:
+		}
 	}
-
 	handleNextPacket(client)
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/gtk"
 )
 
@@ -19,14 +20,15 @@ var (
 	connection net.Conn
 	buffersize int
 
-	mainWindow gtk.Window
-	builder    *gtk.Builder
+	mainWindow    gtk.Window
+	builder       *gtk.Builder
+	authWin       *gtk.Window
+	messageText   *gtk.TextBuffer
+	messageOutput *gtk.Layout
 
 	settings map[string]string
 	online   bool
 )
-
-var authWin *gtk.Window
 
 func main() {
 	settings = make(map[string]string)
@@ -64,16 +66,41 @@ func drawMain() int {
 	mainWindow.ShowAll()
 
 	//
+	//MessageEntry
+	//
+	obj, err = builder.GetObject("MessageText")
+	if err != nil {
+		log.Fatal("Error in object getting:", err)
+		return 2
+	}
+	textView := obj.(*gtk.TextView)
+	textView.Connect("key-press-event", func(any interface{}, gdkEvent *gdk.Event) { //func() { //
+		keyEvent := &gdk.EventKey{gdkEvent}
+		//keyEvent.KeyVal(), keyEvent.State()
+		if keyEvent.KeyVal() == 65293 && keyEvent.State()%2 != 1 {
+			sendMessage()
+		}
+		//keyEvent.
+		//fmt.Print("pressed")
+	})
+
+	messageText, err = textView.GetBuffer()
+	if err != nil {
+		log.Fatal("Error in object getting:", err)
+		return 2
+	}
+
+	//
 	//Send button
 	//
-	obj, err = builder.GetObject("CloseEvt")
+	obj, err = builder.GetObject("SendEvt")
 	if err != nil {
 		log.Fatal("Error:", err)
 		return 2
 	}
 	closeBtn := obj.(*gtk.EventBox)
 	closeBtn.Connect("button-release-event", func() {
-		gtk.MainQuit()
+		sendMessage()
 	})
 
 	//
@@ -180,6 +207,16 @@ func drawMain() int {
 		}
 	})
 
+	//
+	//MessageOutput
+	//
+	obj, err = builder.GetObject("MessageOutput")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 4
+	}
+	messageOutput = obj.(*gtk.Layout)
+
 	return 0
 }
 
@@ -264,13 +301,13 @@ func parseSettings() int {
 
 func popupError(content, title string) {
 	popup := gtk.MessageDialogNew(nil, 0, gtk.MESSAGE_ERROR, gtk.BUTTONS_NONE, content)
-	popup.SetTitle("Error")
+	popup.SetTitle(title)
 	popup.ShowAll()
 }
 
 func popupInfo(content, title string) {
 	popup := gtk.MessageDialogNew(nil, 0, gtk.MESSAGE_INFO, gtk.BUTTONS_NONE, content)
-	popup.SetTitle("Error")
+	popup.SetTitle(title)
 	popup.ShowAll()
 }
 
@@ -469,4 +506,21 @@ func establishConnetcion(auth bool, authPass, authUser *gtk.Entry) error {
 		return nil
 	}
 	return nil
+}
+
+func sendMessage() {
+	str, err := messageText.GetText(messageText.GetIterAtOffset(0), messageText.GetEndIter(), true)
+	if err != nil {
+		popupError("Error: "+err.Error(), "Error")
+	} else {
+		//messageText.Get
+		//messageOutput.Add()
+		popupError("Error: "+str, "Error")
+		go clearText()
+	}
+}
+
+func clearText() {
+	time.Sleep(10000000)
+	messageText.SetText("")
 }
