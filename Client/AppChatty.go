@@ -24,10 +24,13 @@ var (
 	builder       *gtk.Builder
 	authWin       *gtk.Window
 	messageText   *gtk.TextBuffer
-	messageOutput *gtk.Layout
+	messageOutput *gtk.TextBuffer
 
+	messages map[string][][]string
 	settings map[string]string
 	online   bool
+
+	clUsername string
 )
 
 func main() {
@@ -41,7 +44,7 @@ func main() {
 		return
 	}
 
-	if drawMain() != 0 {
+	if initWindows() != 0 {
 		return
 	}
 
@@ -50,7 +53,7 @@ func main() {
 
 }
 
-func drawMain() int {
+func initWindows() int {
 
 	//Getting objects and defining events
 	//Main window
@@ -215,7 +218,12 @@ func drawMain() int {
 		log.Fatal("Error:", err)
 		return 4
 	}
-	messageOutput = obj.(*gtk.Layout)
+	messageOutputView := obj.(*gtk.TextView)
+	messageOutput, err = messageOutputView.GetBuffer()
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 4
+	}
 
 	return 0
 }
@@ -334,7 +342,7 @@ func readPacket(client net.Conn, timeout int) (out_err error, dataLen uint32, op
 	if dataLen != 0 {
 		buffer = make([]byte, dataLen)
 		if timeout != 0 {
-			client.SetDeadline(time.Now().Add(time.Duration(timeout)))
+			client.SetReadDeadline(time.Now().Add(time.Duration(timeout)))
 		}
 		_, err = client.Read(buffer)
 		if err != nil {
@@ -395,16 +403,22 @@ func sendRegisterOrAuth(connetcion net.Conn, username, password string, auth boo
 	var (
 		buffer bytes.Buffer
 	)
-	nLen := make([]byte, 2)
-	pLen := make([]byte, 2)
+
 	usernameB := []byte(username)
 	passwordB := []byte(password)
-	binary.LittleEndian.PutUint16(nLen, uint16(len(usernameB)))
-	binary.LittleEndian.PutUint16(pLen, uint16(len(passwordB)))
+	nLen := len(usernameB)
+	pLen := len(passwordB)
 
-	buffer.Write(nLen)
+	if pLen > 255 {
+		return errors.New("Password is too big")
+	}
+	if nLen > 255 {
+		return errors.New("Username is too big")
+	}
+
+	buffer.WriteByte(byte(nLen))
 	buffer.Write(usernameB)
-	buffer.Write(pLen)
+	buffer.WriteByte(byte(pLen))
 	buffer.Write(passwordB)
 	if auth {
 		err := sendPacket(connection, 5, buffer.Bytes())
@@ -420,32 +434,8 @@ func sendRegisterOrAuth(connetcion net.Conn, username, password string, auth boo
 	return nil
 }
 
-func setOffline() {
-	online = false
-	obj, err := builder.GetObject("OnlineIcon")
-	if err != nil {
-		log.Fatal("Can't change online icon, error in object getting:", err)
-	}
-	icon := obj.(*gtk.Image)
-	icon.SetFromIconName("network-offline", 4)
-
-	obj, err = builder.GetObject("ReconnectIcon")
-	if err != nil {
-		log.Fatal("Can't change online icon, error in object getting:", err)
-	}
-	icon = obj.(*gtk.Image)
-	icon.SetVisible(true)
-
-	obj, err = builder.GetObject("ReconnectEvt")
-	if err != nil {
-		log.Fatal("Can't change online icon, error in object getting:", err)
-	}
-	evt := obj.(*gtk.EventBox)
-	evt.SetVisible(true)
-}
-
-func setOnline() {
-	online = true
+func setOnline(online bool) {
+	online = online
 	obj, err := builder.GetObject("OnlineIcon")
 	if err != nil {
 		log.Fatal("Can't change online icon, error in object getting:", err)
@@ -458,14 +448,14 @@ func setOnline() {
 		log.Fatal("Can't change online icon, error in object getting:", err)
 	}
 	icon = obj.(*gtk.Image)
-	icon.SetVisible(false)
+	icon.SetVisible(!online)
 
 	obj, err = builder.GetObject("ReconnectEvt")
 	if err != nil {
 		log.Fatal("Can't change online icon, error in object getting:", err)
 	}
 	evt := obj.(*gtk.EventBox)
-	evt.SetVisible(false)
+	evt.SetVisible(!online)
 }
 
 func establishConnetcion(auth bool, authPass, authUser *gtk.Entry) error {
@@ -496,13 +486,14 @@ func establishConnetcion(auth bool, authPass, authUser *gtk.Entry) error {
 		connection = nil
 		return err
 	}
-	err, _, opCode, _ := readPacket(connection, 0)
+	err, _, opCode, _ := readPacket(connection, 5000)
 	if err != nil {
 		return err
 	}
 	if opCode == 200 {
-		setOnline()
+		setOnline(true)
 		authWin.Hide()
+		clUsername = username
 		return nil
 	}
 	return nil
@@ -513,9 +504,7 @@ func sendMessage() {
 	if err != nil {
 		popupError("Error: "+err.Error(), "Error")
 	} else {
-		//messageText.Get
-		//messageOutput.Add()
-		popupError("Error: "+str, "Error")
+		messageOutput.Insert(messageOutput.GetEndIter(), "\n\n"+clUsername+": \t"+str)
 		go clearText()
 	}
 }

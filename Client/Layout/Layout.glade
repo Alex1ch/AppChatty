@@ -59,7 +59,11 @@
             <property name="visible">True</property>
             <property name="can_focus">False</property>
             <child>
-              <placeholder/>
+              <object class="GtkScrolledWindow">
+                <property name="visible">True</property>
+                <property name="can_focus">True</property>
+                <property name="shadow_type">in</property>
+              </object>
             </child>
             <style>
               <class name="color: #000000"/>
@@ -71,29 +75,6 @@
             <property name="top_attach">0</property>
             <property name="width">4</property>
             <property name="height">9</property>
-          </packing>
-        </child>
-        <child>
-          <object class="GtkScrolledWindow">
-            <property name="visible">True</property>
-            <property name="can_focus">True</property>
-            <property name="shadow_type">in</property>
-            <child>
-              <object class="GtkTextView" id="MessageText">
-                <property name="visible">True</property>
-                <property name="can_focus">True</property>
-                <property name="hscroll_policy">natural</property>
-                <property name="left_margin">10</property>
-                <property name="right_margin">10</property>
-                <property name="top_margin">10</property>
-                <property name="bottom_margin">10</property>
-              </object>
-            </child>
-          </object>
-          <packing>
-            <property name="left_attach">4</property>
-            <property name="top_attach">8</property>
-            <property name="width">7</property>
           </packing>
         </child>
         <child>
@@ -174,20 +155,19 @@
           </packing>
         </child>
         <child>
-          <object class="GtkLayout" id="MessageOutput">
+          <object class="GtkScrolledWindow">
             <property name="visible">True</property>
-            <property name="can_focus">False</property>
+            <property name="can_focus">True</property>
+            <property name="shadow_type">in</property>
             <child>
-              <object class="GtkEntry">
-                <property name="width_request">100</property>
-                <property name="height_request">80</property>
+              <object class="GtkTextView" id="MessageOutput">
                 <property name="visible">True</property>
                 <property name="can_focus">True</property>
+                <property name="left_margin">10</property>
+                <property name="right_margin">10</property>
+                <property name="top_margin">10</property>
+                <property name="bottom_margin">10</property>
               </object>
-              <packing>
-                <property name="x">11</property>
-                <property name="y">50</property>
-              </packing>
             </child>
           </object>
           <packing>
@@ -195,6 +175,29 @@
             <property name="top_attach">1</property>
             <property name="width">10</property>
             <property name="height">7</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkScrolledWindow">
+            <property name="visible">True</property>
+            <property name="can_focus">True</property>
+            <property name="shadow_type">in</property>
+            <child>
+              <object class="GtkTextView" id="MessageText">
+                <property name="visible">True</property>
+                <property name="can_focus">True</property>
+                <property name="hscroll_policy">natural</property>
+                <property name="left_margin">10</property>
+                <property name="right_margin">10</property>
+                <property name="top_margin">10</property>
+                <property name="bottom_margin">10</property>
+              </object>
+            </child>
+          </object>
+          <packing>
+            <property name="left_attach">4</property>
+            <property name="top_attach">8</property>
+            <property name="width">7</property>
           </packing>
         </child>
         <child>

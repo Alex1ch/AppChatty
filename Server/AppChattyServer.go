@@ -2,10 +2,21 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
+	"reflect"
 	"time"
+
+	"github.com/jinzhu/gorm"
+	_ "github.com/jinzhu/gorm/dialects/sqlite"
+)
+
+var (
+	users map[string]net.Conn
+	appDB *gorm.DB
 )
 
 const (
@@ -17,19 +28,44 @@ const (
 	BUFFERSIZE = 1024
 )
 
-var users map[string]net.Conn
+//DB Structures
+type userStruct struct {
+	gorm.Model
+	Username string
+	Hash     []byte
+}
+
+func main() {
+	//Initialization
+	var err error
+	appDB, err = gorm.Open("sqlite3", "AppChattyServer.db")
+	if err != nil {
+		panic("failed to connect database")
+	}
+	defer appDB.Close()
+
+	appDB.AutoMigrate(&userStruct{})
+	users = make(map[string]net.Conn)
+
+	//ListenStart
+	listenClient(ADDRESS, PORT)
+}
 
 func handleNextPacket(client net.Conn) {
 	var (
-		exitCode int
-		recLen   uint32
-		opCode   uint16
-		buffer   []byte
+		err    error
+		recLen uint32
+		opCode uint16
+		buffer []byte
 	)
 
 	for {
-		exitCode, recLen, opCode, buffer = readPacket(client, 0)
-		fmt.Println(exitCode, recLen, opCode, buffer)
+		err, recLen, opCode, buffer = readPacket(client, 0)
+		if err != nil {
+			log.Println(err.Error())
+			return
+		}
+		fmt.Println(recLen, opCode, buffer)
 		switch opCode {
 		case 1:
 
@@ -42,30 +78,64 @@ func handleNextPacket(client net.Conn) {
 func handleSession(client net.Conn) {
 	fmt.Println("Session started for " + client.RemoteAddr().String())
 
-	exitCode, _, opCode, buffer := readPacket(client, 0)
-	if exitCode != 0 {
-		return
-	}
+	var (
+		err      error
+		opCode   uint16
+		buffer   []byte
+		offset   uint16
+		nLen     byte
+		username string
+		passLen  byte
+		password []byte
+		hash     [32]byte
+	)
 
-	var offset uint16 = 0
-	if !(opCode == 4 || opCode == 5) {
-		fmt.Println("Session error, anauthorized")
-		sendPacket(client, 401, []byte{})
-		client.Close()
-		return
+	for {
+		err, _, opCode, buffer = readPacket(client, 0)
+		if err != nil {
+			log.Println(err.Error())
+			return
+		}
+
+		offset = 0
+		if !(opCode == 4 || opCode == 5) {
+			fmt.Println("Session error, anauthorized")
+			sendPacket(client, 401, nil)
+			client.Close()
+			return
+		}
+		nLen = buffer[offset]
+		offset += 1
+		username = string(buffer[offset : offset+uint16(nLen)])
+		offset += uint16(nLen)
+		passLen = buffer[offset]
+		offset += 1
+		password = buffer[offset : offset+uint16(passLen)]
+
+		hash = sha256.Sum256(password)
+		if opCode == 5 {
+			var user userStruct
+			appDB.First(&user, "username = ?", username)
+			if reflect.DeepEqual(user, userStruct{}) {
+				sendPacket(client, 404, nil)
+				fmt.Println("Received NX auth from", username)
+			} else if bytes.Equal(hash[:], user.Hash[:]) {
+				sendPacket(client, 200, nil)
+				fmt.Println("Received auth from", username)
+				break
+			} else {
+				sendPacket(client, 423, nil)
+				fmt.Println("Received wrong password from", username)
+			}
+		} else if opCode == 4 {
+			fmt.Println("Received register from", username)
+			appDB.Create(&userStruct{Username: username, Hash: hash[:]})
+			sendPacket(client, 200, nil)
+			break
+		}
 	}
-	nLen := binary.LittleEndian.Uint16(buffer[offset : offset+2])
-	offset += 2
-	username := string(buffer[offset : offset+nLen])
-	offset += nLen
-	//passLen := binary.LittleEndian.Uint16(buffer[offset : offset+2])
-	offset += 2
-	//password := binary.LittleEndian.Uint16(buffer[offset : offset+passLen])
 
 	users[username] = client
-	fmt.Println("Received register from", username)
-
-	sendPacket(client, 200, []byte{})
 
 	handleNextPacket(client)
 }
@@ -89,19 +159,14 @@ func listenClient(IP string, PORT string) int {
 	}
 }
 
-func main() {
-	users = make(map[string]net.Conn)
-	listenClient(ADDRESS, PORT)
-}
-
-func readPacket(client net.Conn, timeout int) (exitCode int, dataLen uint32, opCode uint16, buffer []byte) {
+func readPacket(client net.Conn, timeout int) (out_err error, dataLen uint32, opCode uint16, buffer []byte) {
 	//defer readRecover(client, &exitCode)
 	dataLenB := make([]byte, 4)
 	_, err := client.Read(dataLenB)
 	if err != nil {
 		fmt.Println("Error in message receiving(len): " + err.Error())
 		client.Close()
-		exitCode = 1
+		out_err = err
 		return
 	}
 	dataLen = binary.LittleEndian.Uint32(dataLenB)
@@ -110,7 +175,7 @@ func readPacket(client net.Conn, timeout int) (exitCode int, dataLen uint32, opC
 	if err != nil {
 		fmt.Println("Error in message receiving(opCode): " + err.Error())
 		client.Close()
-		exitCode = 1
+		out_err = err
 		return
 	}
 	opCode = binary.LittleEndian.Uint16(opCodeB)
@@ -123,15 +188,13 @@ func readPacket(client net.Conn, timeout int) (exitCode int, dataLen uint32, opC
 		if err != nil {
 			fmt.Println("Error in message receiving(data): " + err.Error())
 			client.Close()
-			exitCode = 1
+			out_err = err
 			return
 		}
 	} else {
 		buffer = nil
-		exitCode = 0
 		return
 	}
-	exitCode = 0
 	return
 }
 
