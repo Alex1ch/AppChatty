@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,8 +16,9 @@ import (
 )
 
 var (
-	users map[string]net.Conn
-	appDB *gorm.DB
+	users        map[string]net.Conn
+	appDB        *gorm.DB
+	none, none64 []byte
 )
 
 const (
@@ -36,6 +38,9 @@ type userStruct struct {
 }
 
 func main() {
+	none = []byte{0xff, 0xff, 0xff, 0xff}
+	none64 = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+
 	//Initialization
 	var err error
 	appDB, err = gorm.Open("sqlite3", "AppChattyServer.db")
@@ -62,17 +67,25 @@ func handleNextPacket(client net.Conn) {
 	for {
 		err, recLen, opCode, buffer = readPacket(client, 0)
 		if err != nil {
+			sendPacket(client, 400, nil)
 			log.Println(err.Error())
 			return
 		}
 		fmt.Println(recLen, opCode, buffer)
 		switch opCode {
-		case 1:
-
+		case 6:
+			id, err := getUserIDbyName(buffer)
+			if err != nil {
+				log.Println(err.Error())
+				sendPacket(client, 404, nil)
+			}
+			idB := make([]byte, 8)
+			binary.LittleEndian.PutUint64(idB, id)
+			sendPacket(client, 200, idB)
 		default:
 		}
 	}
-	handleNextPacket(client)
+	//handleNextPacket(client)
 }
 
 func handleSession(client net.Conn) {
@@ -99,17 +112,29 @@ func handleSession(client net.Conn) {
 
 		offset = 0
 		if !(opCode == 4 || opCode == 5) {
-			fmt.Println("Session error, anauthorized")
+			fmt.Println("Session error, unauthorized")
 			sendPacket(client, 401, nil)
 			client.Close()
 			return
 		}
 		nLen = buffer[offset]
-		offset += 1
+		if nLen == 0 {
+			fmt.Println("Session error, bad request")
+			sendPacket(client, 400, nil)
+			client.Close()
+			return
+		}
+		offset++
 		username = string(buffer[offset : offset+uint16(nLen)])
 		offset += uint16(nLen)
 		passLen = buffer[offset]
-		offset += 1
+		if passLen == 0 {
+			fmt.Println("Session error, bad request")
+			sendPacket(client, 400, nil)
+			client.Close()
+			return
+		}
+		offset++
 		password = buffer[offset : offset+uint16(passLen)]
 
 		hash = sha256.Sum256(password)
@@ -128,10 +153,17 @@ func handleSession(client net.Conn) {
 				fmt.Println("Received wrong password from", username)
 			}
 		} else if opCode == 4 {
-			fmt.Println("Received register from", username)
-			appDB.Create(&userStruct{Username: username, Hash: hash[:]})
-			sendPacket(client, 200, nil)
-			break
+			var user userStruct
+			appDB.First(&user, "username = ?", username)
+			if reflect.DeepEqual(user, userStruct{}) {
+				fmt.Println("Received register from", username)
+				appDB.Create(&userStruct{Username: username, Hash: hash[:]})
+				sendPacket(client, 200, nil)
+				break
+			} else {
+				sendPacket(client, 406, nil)
+				fmt.Println("User already exists", username)
+			}
 		}
 	}
 
@@ -159,8 +191,11 @@ func listenClient(IP string, PORT string) int {
 	}
 }
 
-func readPacket(client net.Conn, timeout int) (out_err error, dataLen uint32, opCode uint16, buffer []byte) {
+func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint32, opCode uint16, buffer []byte) {
 	//defer readRecover(client, &exitCode)
+	if timeout != 0 {
+		client.SetReadDeadline(time.Now().Add(time.Duration(timeout * int64(time.Second))))
+	}
 	dataLenB := make([]byte, 4)
 	_, err := client.Read(dataLenB)
 	if err != nil {
@@ -181,9 +216,6 @@ func readPacket(client net.Conn, timeout int) (out_err error, dataLen uint32, op
 	opCode = binary.LittleEndian.Uint16(opCodeB)
 	if dataLen != 0 {
 		buffer = make([]byte, dataLen)
-		if timeout != 0 {
-			client.SetDeadline(time.Now().Add(time.Duration(timeout)))
-		}
 		_, err = client.Read(buffer)
 		if err != nil {
 			fmt.Println("Error in message receiving(data): " + err.Error())
@@ -236,5 +268,27 @@ func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 			return err
 		}
 		return nil
+	}
+}
+
+//
+//
+//packet Handle Functions
+//
+//
+
+func getUserIDbyName(buffer []byte) (uint64, error) {
+	var (
+		user   userStruct
+		userID uint64
+	)
+	nLen := buffer[0]
+	name := string(buffer[1 : 1+nLen])
+	appDB.First(&user, "username = ?", name)
+	if reflect.DeepEqual(user, userStruct{}) {
+		return userID, errors.New("User doesn't exists")
+	} else {
+		userID = uint64(user.ID)
+		return userID, nil
 	}
 }

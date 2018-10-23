@@ -8,7 +8,7 @@
     <property name="window_position">center</property>
     <property name="default_width">540</property>
     <property name="default_height">450</property>
-    <property name="icon_name">dialog-ok</property>
+    <property name="icon">Stickers.png</property>
     <property name="urgency_hint">True</property>
     <child>
       <placeholder/>
@@ -55,30 +55,8 @@
           </packing>
         </child>
         <child>
-          <object class="GtkViewport" id="ContactsView">
-            <property name="visible">True</property>
-            <property name="can_focus">False</property>
-            <child>
-              <object class="GtkScrolledWindow">
-                <property name="visible">True</property>
-                <property name="can_focus">True</property>
-                <property name="shadow_type">in</property>
-              </object>
-            </child>
-            <style>
-              <class name="color: #000000"/>
-              <class name="background: #000000"/>
-            </style>
-          </object>
-          <packing>
-            <property name="left_attach">0</property>
-            <property name="top_attach">0</property>
-            <property name="width">4</property>
-            <property name="height">9</property>
-          </packing>
-        </child>
-        <child>
           <object class="GtkEventBox" id="SettingsEvt">
+            <property name="height_request">66</property>
             <property name="visible">True</property>
             <property name="can_focus">False</property>
             <child>
@@ -113,6 +91,7 @@
         </child>
         <child>
           <object class="GtkEventBox" id="CloseEvt">
+            <property name="height_request">66</property>
             <property name="visible">True</property>
             <property name="can_focus">False</property>
             <child>
@@ -126,6 +105,8 @@
         </child>
         <child>
           <object class="GtkImage" id="OnlineIcon">
+            <property name="width_request">66</property>
+            <property name="height_request">66</property>
             <property name="visible">True</property>
             <property name="can_focus">False</property>
             <property name="pixel_size">55</property>
@@ -138,14 +119,17 @@
         </child>
         <child>
           <object class="GtkEventBox" id="ReconnectEvt">
+            <property name="height_request">66</property>
             <property name="visible">True</property>
             <property name="can_focus">False</property>
             <child>
               <object class="GtkImage" id="ReconnectIcon">
+                <property name="width_request">66</property>
+                <property name="height_request">66</property>
                 <property name="visible">True</property>
                 <property name="can_focus">False</property>
-                <property name="pixel_size">57</property>
-                <property name="icon_name">media-playlist-repeat</property>
+                <property name="pixel_size">38</property>
+                <property name="icon_name">emblem-unreadable</property>
               </object>
             </child>
           </object>
@@ -178,7 +162,72 @@
           </packing>
         </child>
         <child>
+          <object class="GtkLayout">
+            <property name="height_request">66</property>
+            <property name="visible">True</property>
+            <property name="can_focus">False</property>
+            <child>
+              <object class="GtkEntry" id="AddContactEntry">
+                <property name="width_request">192</property>
+                <property name="height_request">29</property>
+                <property name="visible">True</property>
+                <property name="can_focus">True</property>
+              </object>
+              <packing>
+                <property name="x">10</property>
+                <property name="y">18</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkButton" id="AddButton">
+                <property name="label" translatable="yes">Add</property>
+                <property name="width_request">52</property>
+                <property name="height_request">29</property>
+                <property name="visible">True</property>
+                <property name="can_focus">True</property>
+                <property name="receives_default">True</property>
+              </object>
+              <packing>
+                <property name="x">209</property>
+                <property name="y">18</property>
+              </packing>
+            </child>
+          </object>
+          <packing>
+            <property name="left_attach">0</property>
+            <property name="top_attach">0</property>
+            <property name="width">4</property>
+          </packing>
+        </child>
+        <child>
           <object class="GtkScrolledWindow">
+            <property name="width_request">270</property>
+            <property name="visible">True</property>
+            <property name="can_focus">True</property>
+            <property name="shadow_type">in</property>
+            <child>
+              <object class="GtkViewport">
+                <property name="visible">True</property>
+                <property name="can_focus">False</property>
+                <child>
+                  <object class="GtkListBox" id="ContactsList">
+                    <property name="visible">True</property>
+                    <property name="can_focus">False</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+          <packing>
+            <property name="left_attach">0</property>
+            <property name="top_attach">1</property>
+            <property name="width">4</property>
+            <property name="height">8</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkScrolledWindow">
+            <property name="height_request">66</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
             <property name="shadow_type">in</property>
@@ -225,9 +274,11 @@
     </child>
   </object>
   <object class="GtkWindow" id="Auth">
+    <property name="width_request">260</property>
     <property name="can_focus">False</property>
+    <property name="resizable">False</property>
     <property name="default_height">1</property>
-    <property name="decorated">False</property>
+    <property name="icon">Stickers.png</property>
     <property name="transient_for">Main_window</property>
     <child>
       <placeholder/>
@@ -310,7 +361,7 @@
         </child>
         <child>
           <object class="GtkButton" id="SignUp">
-            <property name="label" translatable="yes">Sign Up</property>
+            <property name="label" translatable="yes">Register</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
             <property name="receives_default">True</property>
@@ -337,17 +388,7 @@
           </packing>
         </child>
         <child>
-          <object class="GtkButton" id="CloseAuth">
-            <property name="label" translatable="yes">x</property>
-            <property name="visible">True</property>
-            <property name="can_focus">True</property>
-            <property name="receives_default">True</property>
-          </object>
-          <packing>
-            <property name="left_attach">9</property>
-            <property name="top_attach">0</property>
-            <property name="height">2</property>
-          </packing>
+          <placeholder/>
         </child>
         <child>
           <placeholder/>

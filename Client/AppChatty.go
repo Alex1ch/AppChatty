@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
@@ -25,16 +26,21 @@ var (
 	authWin       *gtk.Window
 	messageText   *gtk.TextBuffer
 	messageOutput *gtk.TextBuffer
+	сontactsList  *gtk.ListBox
 
 	messages map[string][][]string
 	settings map[string]string
 	online   bool
 
 	clUsername string
+
+	none, none64 []byte
 )
 
 func main() {
 	settings = make(map[string]string)
+	none = []byte{0xff, 0xff, 0xff, 0xff}
+	none64 = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 	if parseSettings() != 0 {
 		return
@@ -142,6 +148,10 @@ func initWindows() int {
 	}
 
 	authWin = obj.(*gtk.Window)
+	authWin.Connect("delete-event", func() bool {
+		authWin.Hide()
+		return true
+	})
 	authWin.SetPosition(gtk.WIN_POS_CENTER_ON_PARENT)
 	authWin.SetTitle("Authentication")
 
@@ -166,19 +176,6 @@ func initWindows() int {
 	authPass := obj.(*gtk.Entry)
 
 	//
-	//Close Button
-	//
-	obj, err = builder.GetObject("CloseAuth")
-	if err != nil {
-		log.Fatal("Error:", err)
-		return 3
-	}
-	CloseBtn := obj.(*gtk.Button)
-	CloseBtn.Connect("clicked", func() {
-		authWin.Hide()
-	})
-
-	//
 	//SignIn Button
 	//
 	obj, err = builder.GetObject("SignIn")
@@ -190,7 +187,7 @@ func initWindows() int {
 	SignInBtn.Connect("clicked", func() {
 		err := establishConnetcion(true, authPass, authUser)
 		if err != nil {
-			popupError(err.Error(), "Error")
+			popupError("Error: "+err.Error(), "Error")
 		}
 	})
 
@@ -206,7 +203,7 @@ func initWindows() int {
 	SignUpBtn.Connect("clicked", func() {
 		err := establishConnetcion(false, authPass, authUser)
 		if err != nil {
-			popupError(err.Error(), "Error")
+			popupError("Error: "+err.Error(), "Error")
 		}
 	})
 
@@ -224,6 +221,57 @@ func initWindows() int {
 		log.Fatal("Error:", err)
 		return 4
 	}
+
+	//
+	//ContactsList
+	//
+	obj, err = builder.GetObject("ContactsList")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 5
+	}
+	сontactsList = obj.(*gtk.ListBox)
+
+	//
+	//AddContactEntry
+	//
+	obj, err = builder.GetObject("AddContactEntry")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 5
+	}
+	addContactEntry := obj.(*gtk.Entry)
+
+	//
+	//AddButton
+	//
+	obj, err = builder.GetObject("AddButton")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 6
+	}
+	addButton := obj.(*gtk.Button)
+	addButton.Connect("clicked", func() {
+		if connection == nil {
+			popupError("Error: No connection", "Error")
+			return
+		}
+		str, err := addContactEntry.GetText()
+		if err != nil {
+			popupError("Error: "+err.Error(), "Error")
+			return
+		}
+		err = addContact(str)
+		if err != nil {
+			if err == io.EOF {
+				connection.Close()
+				connection = nil
+				setOnline(false)
+			}
+			popupError("Error: "+err.Error(), "Error")
+			return
+		}
+	})
 
 	return 0
 }
@@ -266,7 +314,7 @@ func connectToServer() int { //connection net.Conn {
 
 		authWin.SetPosition(gtk.WIN_POS_CENTER_ON_PARENT)
 
-		authWin.Show()
+		authWin.ShowAll()
 
 	} else {
 		popupError("The server IP is not defined in settings(file)", "Error")
@@ -319,8 +367,11 @@ func popupInfo(content, title string) {
 	popup.ShowAll()
 }
 
-func readPacket(client net.Conn, timeout int) (out_err error, dataLen uint32, opCode uint16, buffer []byte) {
+func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint32, opCode uint16, buffer []byte) {
 	//defer readRecover(client, &exitCode)
+	if timeout != 0 {
+		client.SetReadDeadline(time.Now().Add(time.Duration(timeout * int64(time.Second))))
+	}
 	dataLenB := make([]byte, 4)
 	_, err := client.Read(dataLenB)
 	if err != nil {
@@ -341,9 +392,6 @@ func readPacket(client net.Conn, timeout int) (out_err error, dataLen uint32, op
 	opCode = binary.LittleEndian.Uint16(opCodeB)
 	if dataLen != 0 {
 		buffer = make([]byte, dataLen)
-		if timeout != 0 {
-			client.SetReadDeadline(time.Now().Add(time.Duration(timeout)))
-		}
 		_, err = client.Read(buffer)
 		if err != nil {
 			fmt.Println("Error in message receiving(data): " + err.Error())
@@ -399,20 +447,18 @@ func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 	}
 }
 
-func sendRegisterOrAuth(connetcion net.Conn, username, password string, auth bool) error {
-	var (
-		buffer bytes.Buffer
-	)
+func sendRegisterOrAuth(username, password string, auth bool) error {
+	var buffer bytes.Buffer
 
 	usernameB := []byte(username)
 	passwordB := []byte(password)
 	nLen := len(usernameB)
 	pLen := len(passwordB)
 
-	if pLen > 255 {
+	if pLen > 255 || nLen < 0 {
 		return errors.New("Password is too big")
 	}
-	if nLen > 255 {
+	if nLen > 255 || nLen < 0 {
 		return errors.New("Username is too big")
 	}
 
@@ -434,28 +480,38 @@ func sendRegisterOrAuth(connetcion net.Conn, username, password string, auth boo
 	return nil
 }
 
-func setOnline(online bool) {
-	online = online
+func setOnline(_online bool) {
+	online = _online
 	obj, err := builder.GetObject("OnlineIcon")
 	if err != nil {
 		log.Fatal("Can't change online icon, error in object getting:", err)
 	}
 	icon := obj.(*gtk.Image)
-	icon.SetFromIconName("network-wired", 4)
+	if online {
+		icon.SetFromIconName("network-wired", 4)
+	} else {
+		icon.SetFromIconName("network-offline", 4)
+	}
 
 	obj, err = builder.GetObject("ReconnectIcon")
 	if err != nil {
 		log.Fatal("Can't change online icon, error in object getting:", err)
 	}
 	icon = obj.(*gtk.Image)
-	icon.SetVisible(!online)
-
-	obj, err = builder.GetObject("ReconnectEvt")
-	if err != nil {
-		log.Fatal("Can't change online icon, error in object getting:", err)
+	if online {
+		icon.SetFromIconName("emblem-unreadable", 4)
+	} else {
+		icon.SetFromIconName("media-playlist-repeat", 4)
 	}
-	evt := obj.(*gtk.EventBox)
-	evt.SetVisible(!online)
+
+	//icon.SetVisible(!online)
+	//
+	//obj, err = builder.GetObject("ReconnectEvt")
+	//if err != nil {
+	//	log.Fatal("Can't change online icon, error in object getting:", err)
+	//}
+	//evt := obj.(*gtk.EventBox)
+	//evt.SetVisible(!online)
 }
 
 func establishConnetcion(auth bool, authPass, authUser *gtk.Entry) error {
@@ -480,23 +536,33 @@ func establishConnetcion(auth bool, authPass, authUser *gtk.Entry) error {
 	if password == "" {
 		return errors.New("Empty password")
 	}
-	err = sendRegisterOrAuth(connection, username, password, auth)
+	err = sendRegisterOrAuth(username, password, auth)
 	if err != nil {
 		connection.Close()
 		connection = nil
 		return err
 	}
-	err, _, opCode, _ := readPacket(connection, 5000)
+	err, _, opCode, _ := readPacket(connection, 5)
 	if err != nil {
-		return err
+		return errors.New("Server not responding")
 	}
-	if opCode == 200 {
+	switch opCode {
+	case 200:
 		setOnline(true)
 		authWin.Hide()
 		clUsername = username
 		return nil
+	case 404:
+		return errors.New("404: Not found. \nUser doesn't exists")
+	case 406:
+		return errors.New("406: Not acceptable. \nUser already exists")
+	case 423:
+		return errors.New("423: Locked. Wrong password")
+	case 400:
+		return errors.New("400: Bad request")
+	default:
+		return errors.New(fmt.Sprint("Unhandled server response - ", opCode))
 	}
-	return nil
 }
 
 func sendMessage() {
@@ -512,4 +578,43 @@ func sendMessage() {
 func clearText() {
 	time.Sleep(10000000)
 	messageText.SetText("")
+}
+
+func addContact(contactName string) error {
+	var (
+		buffer bytes.Buffer
+	)
+
+	contactNameB := []byte(contactName)
+	lenght := len(contactNameB)
+
+	if lenght > 255 || lenght < 0 {
+		return errors.New("Name is too big")
+	}
+
+	buffer.WriteByte(byte(lenght))
+	buffer.Write(contactNameB)
+
+	err := sendPacket(connection, 6, buffer.Bytes())
+	if err != nil {
+		return err
+	}
+
+	err, len, opCode, recieved := readPacket(connection, 5)
+
+	switch opCode {
+	case 200:
+		if len != 8 {
+			return errors.New("Bad response")
+		}
+		userID := binary.LittleEndian.Uint64(recieved)
+		popupInfo(fmt.Sprint("Id of user ", contactName, " is ", userID), "Response")
+		return nil
+	case 404:
+		return errors.New("404: Not found. \nUser doesn't exists")
+	case 400:
+		return errors.New("400: Bad request")
+	default:
+		return errors.New(fmt.Sprint("Unhandled server response - ", opCode))
+	}
 }
