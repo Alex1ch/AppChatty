@@ -56,7 +56,7 @@ func main() {
 	listenClient(ADDRESS, PORT)
 }
 
-func handleNextPacket(client net.Conn) {
+func handlePacket(client net.Conn) {
 	var (
 		err    error
 		recLen uint32
@@ -95,7 +95,6 @@ func handleSession(client net.Conn) {
 		err      error
 		opCode   uint16
 		buffer   []byte
-		offset   uint16
 		nLen     byte
 		username string
 		passLen  byte
@@ -110,32 +109,42 @@ func handleSession(client net.Conn) {
 			return
 		}
 
-		offset = 0
+		parser := parserStruct{buffer, uint32(len(buffer)), 0}
+
 		if !(opCode == 4 || opCode == 5) {
 			fmt.Println("Session error, unauthorized")
 			sendPacket(client, 401, nil)
 			client.Close()
 			return
 		}
-		nLen = buffer[offset]
+		nLen, err = parser.Byte()
+		if err != nil {
+			return
+		}
 		if nLen == 0 {
 			fmt.Println("Session error, bad request")
 			sendPacket(client, 400, nil)
 			client.Close()
 			return
 		}
-		offset++
-		username = string(buffer[offset : offset+uint16(nLen)])
-		offset += uint16(nLen)
-		passLen = buffer[offset]
+		username, err = parser.String(uint32(nLen))
+		if err != nil {
+			return
+		}
+		passLen, err = parser.Byte()
+		if err != nil {
+			return
+		}
 		if passLen == 0 {
 			fmt.Println("Session error, bad request")
 			sendPacket(client, 400, nil)
 			client.Close()
 			return
 		}
-		offset++
-		password = buffer[offset : offset+uint16(passLen)]
+		password, err = parser.Chunk(uint32(passLen))
+		if err != nil {
+			return
+		}
 
 		hash = sha256.Sum256(password)
 		if opCode == 5 {
@@ -169,7 +178,7 @@ func handleSession(client net.Conn) {
 
 	users[username] = client
 
-	handleNextPacket(client)
+	handlePacket(client)
 }
 
 func listenClient(IP string, PORT string) int {
@@ -243,8 +252,8 @@ func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 	opCodeB := make([]byte, 2)
 	if data != nil {
 		lenB := make([]byte, 4)
-		lenght := len(data)
-		binary.LittleEndian.PutUint32(lenB, uint32(lenght))
+		length := len(data)
+		binary.LittleEndian.PutUint32(lenB, uint32(length))
 		binary.LittleEndian.PutUint16(opCodeB, opCode)
 
 		buffer.Write(lenB)
@@ -291,4 +300,67 @@ func getUserIDbyName(buffer []byte) (uint64, error) {
 		userID = uint64(user.ID)
 		return userID, nil
 	}
+}
+
+//
+//
+//Parser
+//
+//
+type parserStruct struct {
+	data   []byte
+	length uint32
+	offset uint32
+}
+
+func (obj *parserStruct) Byte() (byte, error) {
+	if obj.offset+1 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
+	defer incrementOffset(1, obj)
+	return byte(obj.data[obj.offset]), nil
+}
+
+func (obj *parserStruct) UInt16() (uint16, error) {
+	if obj.offset+1 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
+	defer incrementOffset(2, obj)
+	return binary.LittleEndian.Uint16(obj.data[obj.offset : obj.offset+2]), nil
+}
+
+func (obj *parserStruct) UInt32() (uint32, error) {
+	if obj.offset+1 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
+	defer incrementOffset(4, obj)
+	return binary.LittleEndian.Uint32(obj.data[obj.offset : obj.offset+2]), nil
+}
+
+func (obj *parserStruct) UInt64() (uint64, error) {
+	if obj.offset+1 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
+	defer incrementOffset(8, obj)
+	return binary.LittleEndian.Uint64(obj.data[obj.offset : obj.offset+2]), nil
+}
+
+func (obj *parserStruct) String(len uint32) (string, error) {
+	if obj.offset+1 > obj.length {
+		return "", errors.New("Offset is out of range")
+	}
+	defer incrementOffset(len, obj)
+	return string(obj.data[obj.offset : obj.offset+len]), nil
+}
+
+func (obj *parserStruct) Chunk(len uint32) ([]byte, error) {
+	if obj.offset+1 > obj.length {
+		return nil, errors.New("Offset is out of range")
+	}
+	defer incrementOffset(len, obj)
+	return obj.data[obj.offset : obj.offset+len], nil
+}
+
+func incrementOffset(count uint32, obj *parserStruct) {
+	obj.offset += count
 }

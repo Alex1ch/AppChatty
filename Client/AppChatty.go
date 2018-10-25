@@ -85,12 +85,9 @@ func initWindows() int {
 	textView := obj.(*gtk.TextView)
 	textView.Connect("key-press-event", func(any interface{}, gdkEvent *gdk.Event) { //func() { //
 		keyEvent := &gdk.EventKey{gdkEvent}
-		//keyEvent.KeyVal(), keyEvent.State()
 		if keyEvent.KeyVal() == 65293 && keyEvent.State()%2 != 1 {
 			sendMessage()
 		}
-		//keyEvent.
-		//fmt.Print("pressed")
 	})
 
 	messageText, err = textView.GetBuffer()
@@ -305,6 +302,7 @@ func connectToServer() int { //connection net.Conn {
 		if connection != nil {
 			connection.Close()
 			connection = nil
+			setOnline(false)
 		}
 		connection, err = net.Dial("tcp", settings["ip"]+":"+settings["port"])
 		if err != nil {
@@ -419,8 +417,8 @@ func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 	opCodeB := make([]byte, 2)
 	if data != nil {
 		lenB := make([]byte, 4)
-		lenght := len(data)
-		binary.LittleEndian.PutUint32(lenB, uint32(lenght))
+		length := len(data)
+		binary.LittleEndian.PutUint32(lenB, uint32(length))
 		binary.LittleEndian.PutUint16(opCodeB, opCode)
 
 		buffer.Write(lenB)
@@ -501,7 +499,7 @@ func setOnline(_online bool) {
 	if online {
 		icon.SetFromIconName("emblem-unreadable", 4)
 	} else {
-		icon.SetFromIconName("media-playlist-repeat", 4)
+		icon.SetFromIconName("view-refresh", 4)
 	}
 
 	//icon.SetVisible(!online)
@@ -586,13 +584,13 @@ func addContact(contactName string) error {
 	)
 
 	contactNameB := []byte(contactName)
-	lenght := len(contactNameB)
+	length := len(contactNameB)
 
-	if lenght > 255 || lenght < 0 {
+	if length > 255 || length < 0 {
 		return errors.New("Name is too big")
 	}
 
-	buffer.WriteByte(byte(lenght))
+	buffer.WriteByte(byte(length))
 	buffer.Write(contactNameB)
 
 	err := sendPacket(connection, 6, buffer.Bytes())
@@ -617,4 +615,48 @@ func addContact(contactName string) error {
 	default:
 		return errors.New(fmt.Sprint("Unhandled server response - ", opCode))
 	}
+}
+
+//
+//
+//Parser
+//
+//
+type parserStruct struct {
+	data   []byte
+	offset uint32
+}
+
+func (obj *parserStruct) Byte() byte {
+	defer incrementOffset(1, obj)
+	return byte(obj.data[obj.offset])
+}
+
+func (obj *parserStruct) UInt16() uint16 {
+	defer incrementOffset(2, obj)
+	return binary.LittleEndian.Uint16(obj.data[obj.offset : obj.offset+2])
+}
+
+func (obj *parserStruct) UInt32() uint32 {
+	defer incrementOffset(4, obj)
+	return binary.LittleEndian.Uint32(obj.data[obj.offset : obj.offset+2])
+}
+
+func (obj *parserStruct) UInt64() uint64 {
+	defer incrementOffset(8, obj)
+	return binary.LittleEndian.Uint64(obj.data[obj.offset : obj.offset+2])
+}
+
+func (obj *parserStruct) String(len uint32) string {
+	defer incrementOffset(len, obj)
+	return string(obj.data[obj.offset : obj.offset+len])
+}
+
+func (obj *parserStruct) Chunk(len uint32) []byte {
+	defer incrementOffset(len, obj)
+	return obj.data[obj.offset : obj.offset+len]
+}
+
+func incrementOffset(count uint32, obj *parserStruct) {
+	obj.offset += count
 }
