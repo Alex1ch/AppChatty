@@ -13,8 +13,8 @@ Each packet has a structure defined below. We agreed on this format with the gro
 ### List of operations:
 
 - 1: Message. Data: 
-- - UserID `uint64` (max Value if not defined)
-- - GroupID `uint64` (max Value if not defined)
+- - UserID `uint64` (0 if not defined)
+- - GroupID `uint64` (0 if not defined)
 - - MessageLen `uint16`
 - - MessageContent `utf8`
 

@@ -13,31 +13,55 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eidolon/wordwrap"
+	"github.com/gotk3/gotk3/pango"
+
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/gtk"
 )
+
+type message struct {
+	senderID uint64
+	name     string
+	text     string
+	row      *gtk.ListBoxRow
+}
+
+type chat struct {
+	group    bool
+	verbose  string
+	id       uint64
+	messages []message
+}
 
 var (
 	connection net.Conn
 	buffersize int
 
+	wrapper wordwrap.WrapperFunc
+
 	mainWindow    gtk.Window
 	builder       *gtk.Builder
 	authWin       *gtk.Window
+	settingsWin   *gtk.Window
 	messageText   *gtk.TextBuffer
-	messageOutput *gtk.TextBuffer
+	messageOutput *gtk.ListBox
 	сontactsList  *gtk.ListBox
+	messageScroll *gtk.ScrolledWindow
 
-	messages map[string][][]string
-	settings map[string]string
-	online   bool
+	chats      map[uint64]chat
+	settings   map[string]string
+	online     bool
+	activeChat uint64
 
 	clUsername string
+	clID       uint64
 
 	none, none64 []byte
 )
 
 func main() {
+	chats = make(map[uint64]chat)
 	settings = make(map[string]string)
 	none = []byte{0xff, 0xff, 0xff, 0xff}
 	none64 = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
@@ -53,6 +77,7 @@ func main() {
 	if initWindows() != 0 {
 		return
 	}
+	wrapper = wordwrap.Wrapper(40, false)
 
 	connectToServer()
 	gtk.Main()
@@ -73,6 +98,37 @@ func initWindows() int {
 		gtk.MainQuit()
 	})
 	mainWindow.ShowAll()
+
+	//
+	//Settings Window
+	//
+	obj, err = builder.GetObject("Settings")
+	if err != nil {
+		log.Fatal("Error in object getting:", err)
+		return 2
+	}
+
+	settingsWin = obj.(*gtk.Window)
+
+	settingsWin.Connect("delete-event", func() bool {
+		settingsWin.Hide()
+		return true
+	})
+	settingsWin.SetPosition(gtk.WIN_POS_CENTER_ON_PARENT)
+	settingsWin.SetTitle("Settings")
+
+	//
+	//Settings button
+	//
+	obj, err = builder.GetObject("SettingsEvt")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 2
+	}
+	settingsBtn := obj.(*gtk.EventBox)
+	settingsBtn.Connect("button-release-event", func() {
+		settingsWin.ShowAll()
+	})
 
 	//
 	//MessageEntry
@@ -212,12 +268,17 @@ func initWindows() int {
 		log.Fatal("Error:", err)
 		return 4
 	}
-	messageOutputView := obj.(*gtk.TextView)
-	messageOutput, err = messageOutputView.GetBuffer()
+	messageOutput = obj.(*gtk.ListBox)
+
+	//
+	//MessageOutput
+	//
+	obj, err = builder.GetObject("MessageScroll")
 	if err != nil {
 		log.Fatal("Error:", err)
 		return 4
 	}
+	messageScroll = obj.(*gtk.ScrolledWindow)
 
 	//
 	//ContactsList
@@ -228,6 +289,26 @@ func initWindows() int {
 		return 5
 	}
 	сontactsList = obj.(*gtk.ListBox)
+	сontactsList.Connect("row-activated", func(cList *gtk.ListBox, cListR *gtk.ListBoxRow) {
+		name, err := cListR.GetName()
+		if err != nil {
+			return
+		}
+		nameSplit := strings.Split(name, " ")
+		isGroup, err := strconv.Atoi(nameSplit[0])
+		if err != nil {
+			fmt.Print(isGroup)
+			return
+		}
+		ID, err := strconv.ParseUint(nameSplit[1], 10, 64)
+		if err != nil {
+			return
+		}
+
+		redrawChat(activeChat, ID)
+		activeChat = ID
+
+	})
 
 	//
 	//AddContactEntry
@@ -258,7 +339,7 @@ func initWindows() int {
 			popupError("Error: "+err.Error(), "Error")
 			return
 		}
-		err = addContact(str)
+		err = addContact(0, str)
 		if err != nil {
 			if err == io.EOF {
 				connection.Close()
@@ -321,49 +402,9 @@ func connectToServer() int { //connection net.Conn {
 	return 0
 }
 
-func parseSettings() int {
-	settings["buffersize"] = "2048"
-	settings["port"] = "1666"
-	b, err := ioutil.ReadFile("settings")
-	if err != nil {
-		log.Fatal("Error in setting parsing: ", err)
-		return 1
-	}
-	str := string(b)
-	if len(str) == 0 {
-		log.Fatal("Error: empty settings file")
-		return 1
-	}
-	lines := strings.Split(str, "\n")
-	var split []string
-	for i := range lines {
-		split = strings.Split(lines[i], "=")
-		if len(split) < 2 {
-			continue
-		}
-		settings[split[0]] = split[1]
-	}
-
-	buffersize, err = strconv.Atoi(settings["buffersize"])
-	if err != nil {
-		buffersize = 2048
-		log.Println("Warning: wrong value for \"buffersize\" in settings")
-	}
-
-	return 0
-}
-
-func popupError(content, title string) {
-	popup := gtk.MessageDialogNew(nil, 0, gtk.MESSAGE_ERROR, gtk.BUTTONS_NONE, content)
-	popup.SetTitle(title)
-	popup.ShowAll()
-}
-
-func popupInfo(content, title string) {
-	popup := gtk.MessageDialogNew(nil, 0, gtk.MESSAGE_INFO, gtk.BUTTONS_NONE, content)
-	popup.SetTitle(title)
-	popup.ShowAll()
-}
+//
+// Packet reading
+//
 
 func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint32, opCode uint16, buffer []byte) {
 	//defer readRecover(client, &exitCode)
@@ -404,14 +445,6 @@ func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint32, 
 	return
 }
 
-//func readRecover(client net.Conn, exitCode *int) {
-//	if r := recover(); r != nil {
-//		fmt.Println("Recovered from ", r)
-//		*exitCode = 1
-//		client.Close()
-//	}
-//}
-
 func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 	var buffer bytes.Buffer
 	opCodeB := make([]byte, 2)
@@ -444,6 +477,10 @@ func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 		return nil
 	}
 }
+
+//
+//Online parts
+//
 
 func sendRegisterOrAuth(username, password string, auth bool) error {
 	var buffer bytes.Buffer
@@ -546,9 +583,13 @@ func establishConnetcion(auth bool, authPass, authUser *gtk.Entry) error {
 	}
 	switch opCode {
 	case 200:
+		clUsername = username
+		clID, err = getUserID(clUsername)
+		if err != nil {
+			return err
+		}
 		setOnline(true)
 		authWin.Hide()
-		clUsername = username
 		return nil
 	case 404:
 		return errors.New("404: Not found. \nUser doesn't exists")
@@ -567,8 +608,37 @@ func sendMessage() {
 	str, err := messageText.GetText(messageText.GetIterAtOffset(0), messageText.GetEndIter(), true)
 	if err != nil {
 		popupError("Error: "+err.Error(), "Error")
-	} else {
-		messageOutput.Insert(messageOutput.GetEndIter(), "\n\n"+clUsername+": \t"+str)
+	}
+	if activeChat != 0 {
+		row, _ := gtk.ListBoxRowNew()
+
+		chatEntry := chats[activeChat]
+		chatEntry.messages = append(chatEntry.messages, message{clID, clUsername, str, row})
+		chats[activeChat] = chatEntry
+		var label *gtk.Label
+		if chats[activeChat].group {
+			label, _ = gtk.LabelNew(clUsername + ": " + str)
+		} else {
+			label, _ = gtk.LabelNew(str)
+		}
+
+		//label.SetEllipsize(pango.ELLIPSIZE_MIDDLE)
+		label.SetLineWrap(true)
+		label.SetLineWrapMode(pango.WRAP_WORD_CHAR)
+		label.SetXAlign(0)
+		label.SetMarginStart(10)
+		label.SetMarginTop(12)
+		label.SetMarginBottom(12)
+
+		row.Add(label)
+		row.SetMarginStart(100)
+
+		messageOutput.Add(row)
+		messageOutput.ShowAll()
+
+		adj, _ := gtk.AdjustmentNew(0xffffffff, 0, 0xffffffff, 0, 0, 0)
+		messageScroll.SetVAdjustment(adj)
+
 		go clearText()
 	}
 }
@@ -578,7 +648,24 @@ func clearText() {
 	messageText.SetText("")
 }
 
-func addContact(contactName string) error {
+func addContact(isGroup int, contactName string) error {
+	userID, err := getUserID(contactName)
+	if err != nil {
+		return err
+	}
+	if userID == clID {
+		return errors.New("It's you!")
+	}
+
+	if _, ok := chats[userID]; ok {
+		return errors.New("User already in contacts")
+	}
+
+	addToContactLists(isGroup, userID, contactName)
+	return nil
+}
+
+func getUserID(contactName string) (uint64, error) {
 	var (
 		buffer bytes.Buffer
 	)
@@ -587,7 +674,7 @@ func addContact(contactName string) error {
 	length := len(contactNameB)
 
 	if length > 255 || length < 0 {
-		return errors.New("Name is too big")
+		return 0, errors.New("Name is too big")
 	}
 
 	buffer.WriteByte(byte(length))
@@ -595,7 +682,7 @@ func addContact(contactName string) error {
 
 	err := sendPacket(connection, 6, buffer.Bytes())
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	err, len, opCode, recieved := readPacket(connection, 5)
@@ -603,60 +690,288 @@ func addContact(contactName string) error {
 	switch opCode {
 	case 200:
 		if len != 8 {
-			return errors.New("Bad response")
+			return 0, errors.New("Bad response")
 		}
 		userID := binary.LittleEndian.Uint64(recieved)
-		popupInfo(fmt.Sprint("Id of user ", contactName, " is ", userID), "Response")
-		return nil
+
+		return userID, nil
 	case 404:
-		return errors.New("404: Not found. \nUser doesn't exists")
+		return 0, errors.New("404: Not found. \nUser doesn't exists")
 	case 400:
-		return errors.New("400: Bad request")
+		return 0, errors.New("400: Bad request")
 	default:
-		return errors.New(fmt.Sprint("Unhandled server response - ", opCode))
+		return 0, errors.New(fmt.Sprint("Unhandled server response - ", opCode))
 	}
 }
 
 //
+// etc
 //
-//Parser
+
+func parseSettings() int {
+	settings["buffersize"] = "2048"
+	settings["port"] = "1666"
+	b, err := ioutil.ReadFile("settings")
+	if err != nil {
+		log.Fatal("Error in setting parsing: ", err)
+		return 1
+	}
+	str := string(b)
+	if len(str) == 0 {
+		log.Fatal("Error: empty settings file")
+		return 1
+	}
+	lines := strings.Split(str, "\n")
+	var split []string
+	for i := range lines {
+		split = strings.Split(lines[i], "=")
+		if len(split) < 2 {
+			continue
+		}
+		settings[split[0]] = split[1]
+	}
+
+	buffersize, err = strconv.Atoi(settings["buffersize"])
+	if err != nil {
+		buffersize = 2048
+		log.Println("Warning: wrong value for \"buffersize\" in settings")
+	}
+
+	return 0
+}
+
+func popupError(content, title string) {
+	popup := gtk.MessageDialogNew(nil, 0, gtk.MESSAGE_ERROR, gtk.BUTTONS_NONE, content)
+	popup.SetTitle(title)
+	popup.ShowAll()
+}
+
+func popupInfo(content, title string) {
+	popup := gtk.MessageDialogNew(nil, 0, gtk.MESSAGE_INFO, gtk.BUTTONS_NONE, content)
+	popup.SetTitle(title)
+	popup.ShowAll()
+}
+
+func addToContactLists(isGroup int, ID uint64, verbose string) {
+	row, _ := gtk.ListBoxRowNew()
+
+	chats[ID] = chat{false, verbose, ID, make([]message, 0)}
+
+	label, _ := gtk.LabelNew(verbose)
+	label.SetXAlign(0)
+	label.SetMarginStart(20)
+	label.SetSizeRequest(0, 66)
+	row.Add(label)
+	row.SetName(strconv.Itoa(isGroup) + " " + strconv.FormatUint(ID, 10))
+
+	сontactsList.Insert(row, 0)
+	сontactsList.ShowAll()
+
+	//for i := 0; i < chats.Len(); i++ {
+	//
+	//	}
+}
+
+func redrawChat(prev, next uint64) {
+	if prev == next {
+		return
+	}
+	if prev != 0 {
+		chatPrevMsg := chats[prev].messages
+
+		for i := range chatPrevMsg {
+			messageOutput.Remove(chatPrevMsg[i].row)
+		}
+		fmt.Println(chatPrevMsg)
+	}
+	fmt.Println(prev, next)
+
+	//chatNext := chats[next]
+	chatNextMsg := chats[next].messages
+
+	for i := range chatNextMsg {
+
+		row, _ := gtk.ListBoxRowNew()
+		var label *gtk.Label
+		if chats[activeChat].group {
+			label, _ = gtk.LabelNew(clUsername + ": " + chatNextMsg[i].text)
+		} else {
+			label, _ = gtk.LabelNew(chatNextMsg[i].text)
+		}
+
+		label.SetLineWrap(true)
+		label.SetLineWrapMode(pango.WRAP_WORD_CHAR)
+		label.SetXAlign(0)
+		label.SetMarginStart(10)
+		label.SetMarginTop(12)
+		label.SetMarginBottom(12)
+
+		row.Add(label)
+		if chatNextMsg[i].senderID == clID {
+			row.SetMarginStart(100)
+		} else {
+			row.SetMarginEnd(100)
+		}
+
+		messageOutput.Add(row)
+		messageOutput.ShowAll()
+
+		chatNextMsg[i].row = row
+	}
+	//chatNext.messages = chatNextMsg
+}
+
+func createRow() {
+
+}
+
 //
+// Parser
 //
+
 type parserStruct struct {
 	data   []byte
+	length uint32
 	offset uint32
 }
 
-func (obj *parserStruct) Byte() byte {
+func (obj *parserStruct) Byte() (byte, error) {
+	if obj.offset+1 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
 	defer incrementOffset(1, obj)
-	return byte(obj.data[obj.offset])
+	return byte(obj.data[obj.offset]), nil
 }
 
-func (obj *parserStruct) UInt16() uint16 {
+func (obj *parserStruct) UInt16() (uint16, error) {
+	if obj.offset+2 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
 	defer incrementOffset(2, obj)
-	return binary.LittleEndian.Uint16(obj.data[obj.offset : obj.offset+2])
+	return binary.LittleEndian.Uint16(obj.data[obj.offset : obj.offset+2]), nil
 }
 
-func (obj *parserStruct) UInt32() uint32 {
+func (obj *parserStruct) UInt32() (uint32, error) {
+	if obj.offset+4 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
 	defer incrementOffset(4, obj)
-	return binary.LittleEndian.Uint32(obj.data[obj.offset : obj.offset+2])
+	return binary.LittleEndian.Uint32(obj.data[obj.offset : obj.offset+4]), nil
 }
 
-func (obj *parserStruct) UInt64() uint64 {
+func (obj *parserStruct) UInt64() (uint64, error) {
+	if obj.offset+8 > obj.length {
+		return 0, errors.New("Offset is out of range")
+	}
 	defer incrementOffset(8, obj)
-	return binary.LittleEndian.Uint64(obj.data[obj.offset : obj.offset+2])
+	return binary.LittleEndian.Uint64(obj.data[obj.offset : obj.offset+8]), nil
 }
 
-func (obj *parserStruct) String(len uint32) string {
+func (obj *parserStruct) String(len uint32) (string, error) {
+	if obj.offset+len > obj.length {
+		return "", errors.New("Offset is out of range")
+	}
 	defer incrementOffset(len, obj)
-	return string(obj.data[obj.offset : obj.offset+len])
+	return string(obj.data[obj.offset : obj.offset+len]), nil
 }
 
-func (obj *parserStruct) Chunk(len uint32) []byte {
+func (obj *parserStruct) Chunk(len uint32) ([]byte, error) {
+	if obj.offset+len > obj.length {
+		return nil, errors.New("Offset is out of range")
+	}
 	defer incrementOffset(len, obj)
-	return obj.data[obj.offset : obj.offset+len]
+	return obj.data[obj.offset : obj.offset+len], nil
 }
 
 func incrementOffset(count uint32, obj *parserStruct) {
 	obj.offset += count
+}
+
+//
+// Serializer
+//
+
+type serializerStruct struct {
+	buffer bytes.Buffer
+}
+
+func (obj *serializerStruct) UInt16(input uint16) error {
+	temp := make([]byte, 2)
+	binary.LittleEndian.PutUint16(temp, input)
+	_, err := obj.buffer.Write(temp)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) UInt32(input uint32) error {
+	temp := make([]byte, 4)
+	binary.LittleEndian.PutUint32(temp, input)
+	_, err := obj.buffer.Write(temp)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) UInt64(input uint64) error {
+	temp := make([]byte, 8)
+	binary.LittleEndian.PutUint64(temp, input)
+	_, err := obj.buffer.Write(temp)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) String(input string, lenLen int) error {
+	inputB := []byte(input)
+	len := len(inputB)
+	if lenLen == 1 {
+		err := obj.buffer.WriteByte(byte(len))
+		if err != nil {
+			return err
+		}
+	} else if lenLen == 2 {
+		err := obj.UInt16(uint16(len))
+		if err != nil {
+			return err
+		}
+	} else {
+		err := obj.UInt32(uint32(len))
+		if err != nil {
+			return err
+		}
+	}
+	_, err := obj.buffer.Write(inputB)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) Chunk(input []byte, lenLen int) error {
+	len := len(input)
+	if lenLen == 1 {
+		err := obj.buffer.WriteByte(byte(len))
+		if err != nil {
+			return err
+		}
+	} else if lenLen == 2 {
+		err := obj.UInt16(uint16(len))
+		if err != nil {
+			return err
+		}
+	} else {
+		err := obj.UInt32(uint32(len))
+		if err != nil {
+			return err
+		}
+	}
+	_, err := obj.buffer.Write(input)
+	if err != nil {
+		return err
+	}
+	return nil
 }

@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	users        map[string]net.Conn
+	users        map[uint64]net.Conn
 	appDB        *gorm.DB
 	none, none64 []byte
 )
@@ -50,7 +50,7 @@ func main() {
 	defer appDB.Close()
 
 	appDB.AutoMigrate(&userStruct{})
-	users = make(map[string]net.Conn)
+	users = make(map[uint64]net.Conn)
 
 	//ListenStart
 	listenClient(ADDRESS, PORT)
@@ -129,10 +129,14 @@ func handleSession(client net.Conn) {
 		}
 		username, err = parser.String(uint32(nLen))
 		if err != nil {
+			fmt.Println("Session error, bad request")
+			sendPacket(client, 400, nil)
 			return
 		}
 		passLen, err = parser.Byte()
 		if err != nil {
+			fmt.Println("Session error, bad request")
+			sendPacket(client, 400, nil)
 			return
 		}
 		if passLen == 0 {
@@ -143,6 +147,8 @@ func handleSession(client net.Conn) {
 		}
 		password, err = parser.Chunk(uint32(passLen))
 		if err != nil {
+			fmt.Println("Session error, bad request")
+			sendPacket(client, 400, nil)
 			return
 		}
 
@@ -155,6 +161,7 @@ func handleSession(client net.Conn) {
 				fmt.Println("Received NX auth from", username)
 			} else if bytes.Equal(hash[:], user.Hash[:]) {
 				sendPacket(client, 200, nil)
+				users[uint64(user.ID)] = client
 				fmt.Println("Received auth from", username)
 				break
 			} else {
@@ -168,6 +175,7 @@ func handleSession(client net.Conn) {
 				fmt.Println("Received register from", username)
 				appDB.Create(&userStruct{Username: username, Hash: hash[:]})
 				sendPacket(client, 200, nil)
+				users[uint64(user.ID)] = client
 				break
 			} else {
 				sendPacket(client, 406, nil)
@@ -175,8 +183,6 @@ func handleSession(client net.Conn) {
 			}
 		}
 	}
-
-	users[username] = client
 
 	handlePacket(client)
 }
@@ -304,7 +310,7 @@ func getUserIDbyName(buffer []byte) (uint64, error) {
 
 //
 //
-//Parser
+// Parser
 //
 //
 type parserStruct struct {
@@ -322,7 +328,7 @@ func (obj *parserStruct) Byte() (byte, error) {
 }
 
 func (obj *parserStruct) UInt16() (uint16, error) {
-	if obj.offset+1 > obj.length {
+	if obj.offset+2 > obj.length {
 		return 0, errors.New("Offset is out of range")
 	}
 	defer incrementOffset(2, obj)
@@ -330,23 +336,23 @@ func (obj *parserStruct) UInt16() (uint16, error) {
 }
 
 func (obj *parserStruct) UInt32() (uint32, error) {
-	if obj.offset+1 > obj.length {
+	if obj.offset+4 > obj.length {
 		return 0, errors.New("Offset is out of range")
 	}
 	defer incrementOffset(4, obj)
-	return binary.LittleEndian.Uint32(obj.data[obj.offset : obj.offset+2]), nil
+	return binary.LittleEndian.Uint32(obj.data[obj.offset : obj.offset+4]), nil
 }
 
 func (obj *parserStruct) UInt64() (uint64, error) {
-	if obj.offset+1 > obj.length {
+	if obj.offset+8 > obj.length {
 		return 0, errors.New("Offset is out of range")
 	}
 	defer incrementOffset(8, obj)
-	return binary.LittleEndian.Uint64(obj.data[obj.offset : obj.offset+2]), nil
+	return binary.LittleEndian.Uint64(obj.data[obj.offset : obj.offset+8]), nil
 }
 
 func (obj *parserStruct) String(len uint32) (string, error) {
-	if obj.offset+1 > obj.length {
+	if obj.offset+len > obj.length {
 		return "", errors.New("Offset is out of range")
 	}
 	defer incrementOffset(len, obj)
@@ -354,7 +360,7 @@ func (obj *parserStruct) String(len uint32) (string, error) {
 }
 
 func (obj *parserStruct) Chunk(len uint32) ([]byte, error) {
-	if obj.offset+1 > obj.length {
+	if obj.offset+len > obj.length {
 		return nil, errors.New("Offset is out of range")
 	}
 	defer incrementOffset(len, obj)
@@ -363,4 +369,94 @@ func (obj *parserStruct) Chunk(len uint32) ([]byte, error) {
 
 func incrementOffset(count uint32, obj *parserStruct) {
 	obj.offset += count
+}
+
+//
+//
+// Serializer
+//
+//
+type serializerStruct struct {
+	buffer bytes.Buffer
+}
+
+func (obj *serializerStruct) UInt16(input uint16) error {
+	temp := make([]byte, 2)
+	binary.LittleEndian.PutUint16(temp, input)
+	_, err := obj.buffer.Write(temp)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) UInt32(input uint32) error {
+	temp := make([]byte, 4)
+	binary.LittleEndian.PutUint32(temp, input)
+	_, err := obj.buffer.Write(temp)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) UInt64(input uint64) error {
+	temp := make([]byte, 8)
+	binary.LittleEndian.PutUint64(temp, input)
+	_, err := obj.buffer.Write(temp)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) String(input string, lenLen int) error {
+	inputB := []byte(input)
+	len := len(inputB)
+	if lenLen == 1 {
+		err := obj.buffer.WriteByte(byte(len))
+		if err != nil {
+			return err
+		}
+	} else if lenLen == 2 {
+		err := obj.UInt16(uint16(len))
+		if err != nil {
+			return err
+		}
+	} else {
+		err := obj.UInt32(uint32(len))
+		if err != nil {
+			return err
+		}
+	}
+	_, err := obj.buffer.Write(inputB)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (obj *serializerStruct) Chunk(input []byte, lenLen int) error {
+	len := len(input)
+	if lenLen == 1 {
+		err := obj.buffer.WriteByte(byte(len))
+		if err != nil {
+			return err
+		}
+	} else if lenLen == 2 {
+		err := obj.UInt16(uint16(len))
+		if err != nil {
+			return err
+		}
+	} else {
+		err := obj.UInt32(uint32(len))
+		if err != nil {
+			return err
+		}
+	}
+	_, err := obj.buffer.Write(input)
+	if err != nil {
+		return err
+	}
+	return nil
 }
