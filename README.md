@@ -34,11 +34,13 @@ Each packet has a structure defined below. Each packet should begin with `uint16
 #### 6: Get User ID by name. Data:
 - nameLen `byte`
 - name `utf8` 
+
 Response 404 or 200 with data:
 - UserID `uint64`
 
 #### 7: Get name by User ID . Data:
 - UserID `uint64`
+
 Response 404 or 200 with data:
 - nameLen `byte`
 - name `utf8` 
