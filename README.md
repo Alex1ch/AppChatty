@@ -8,27 +8,16 @@ Chat for DS Lab (SNE)
 
 ## Chat messages
 
-Each packet has a structure defined below. We agreed on this format with the groupmate [Rustem Kamalov](https://github.com/karust) to make our chats compatible. Each packet should begin with `uint32` **data length** which is followed by `uint16` **operation code**. After this, actual **data** of the packets begins. We implemented following packets.
+Each packet has a structure defined below. Each packet should begin with `uint16` **data length** which is followed by `uint16` **operation code**. After this, actual **data** of the packets begins. We implemented following packets.
 
 ### List of operations:
 
 - 1: Message. Data: 
+- - SenderID `uint64` 
 - - UserID `uint64` (0 if not defined)
 - - GroupID `uint64` (0 if not defined)
 - - MessageLen `uint16`
 - - MessageContent `utf8`
-
-- 2: Sticker. Data:
-- - UserID `uint64`
-- - GroupID `uint64`
-- - StickerTagLen `uint16`
-- - StickerTag `utf8`
-
-- 3: ShareSticker. Data:
-- - UserID `uint64`
-- - GroupID `uint64`
-- - StickerLen `uint32`
-- - StickerData `raw_data`
 
 - 4: Register. Data:
 - - NameLen `byte`
@@ -48,11 +37,23 @@ Each packet has a structure defined below. We agreed on this format with the gro
 - Response 404 or 200 with data:
 - - UserID `uint64`
 
-- 7: Get Chat History Exists. Data:
+- 7: Get name by User ID . Data:
+- - UserID `uint64`
+- Response 404 or 200 with data:
+- - nameLen `byte`
+- - name `utf8` 
+
+- 8: Get Chat History Exists. Data:
 - - UserID `uint64`
 - - GroupID `uint64`
 - - Offset `uint32`
 - - Count `uint32`
+
+- 10: Subscription Connection. Data:
+- - NameLen `byte`
+- - Name `utf8`
+- - PasswordLen `byte`
+- - Password `utf8`
 
 
 ### List of responses: 

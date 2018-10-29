@@ -15,15 +15,24 @@ import (
 	_ "github.com/jinzhu/gorm/dialects/sqlite"
 )
 
+type msgStruct struct {
+	client  net.Conn
+	message string
+	group   bool
+	ID      uint64
+	sender  uint64
+}
+
 var (
 	users        map[uint64]net.Conn
+	subscription map[uint64]net.Conn
 	appDB        *gorm.DB
 	none, none64 []byte
 )
 
 const (
 	//ADDRESS Address of the Server
-	ADDRESS = "127.0.0.1"
+	ADDRESS = "192.168.57.2"
 	//PORT Listen port for the Server
 	PORT = "1237"
 	//BUFFERSIZE Size of the tcp buffer
@@ -35,6 +44,10 @@ type userStruct struct {
 	gorm.Model
 	Username string
 	Hash     []byte
+}
+
+type groupStruct struct {
+	gorm.Model
 }
 
 func main() {
@@ -50,6 +63,7 @@ func main() {
 	defer appDB.Close()
 
 	appDB.AutoMigrate(&userStruct{})
+	subscription = make(map[uint64]net.Conn)
 	users = make(map[uint64]net.Conn)
 
 	//ListenStart
@@ -58,30 +72,89 @@ func main() {
 
 func handlePacket(client net.Conn) {
 	var (
-		err    error
-		recLen uint32
-		opCode uint16
-		buffer []byte
+		err     error
+		dataLen uint16
+		opCode  uint16
+		buffer  []byte
 	)
 
 	for {
-		err, recLen, opCode, buffer = readPacket(client, 0)
+		err, dataLen, opCode, buffer = readPacket(client, 0)
 		if err != nil {
 			sendPacket(client, 400, nil)
 			log.Println(err.Error())
 			return
 		}
-		fmt.Println(recLen, opCode, buffer)
+		fmt.Println(dataLen, opCode, buffer)
 		switch opCode {
+		case 1:
+			parser := parserStruct{buffer, dataLen, 0}
+			senderID, err := parser.UInt64()
+			if err != nil {
+				sendPacket(client, 400, nil)
+				continue
+			}
+			userID, err := parser.UInt64()
+			if err != nil {
+				sendPacket(client, 400, nil)
+				continue
+			}
+			groupID, err := parser.UInt64()
+			if err != nil {
+				sendPacket(client, 400, nil)
+				continue
+			}
+			msgLen, err := parser.UInt16()
+			if err != nil {
+				sendPacket(client, 400, nil)
+				continue
+			}
+			msg, err := parser.String(msgLen)
+			if err != nil {
+				sendPacket(client, 400, nil)
+				continue
+			}
+
+			var msgObj msgStruct
+			if userID != 0 {
+				var user userStruct
+				appDB.First(&user, "id = ?", uint(userID))
+				if reflect.DeepEqual(user, userStruct{}) {
+					sendPacket(client, 404, nil)
+					continue
+				}
+				sendPacket(client, 200, nil)
+				msgObj = msgStruct{users[userID], msg, false, userID, senderID}
+			} else {
+				msgObj = msgStruct{users[groupID], msg, true, groupID, senderID}
+			}
+
+			go sendMessage(&msgObj)
+
 		case 6:
 			id, err := getUserIDbyName(buffer)
 			if err != nil {
 				log.Println(err.Error())
+				if err.Error() == "Bad format" {
+					sendPacket(client, 400, nil)
+				}
 				sendPacket(client, 404, nil)
 			}
 			idB := make([]byte, 8)
 			binary.LittleEndian.PutUint64(idB, id)
 			sendPacket(client, 200, idB)
+		case 7:
+			if len(buffer) != 8 {
+				sendPacket(client, 400, nil)
+			}
+			username, err := getNamebyUserID(binary.LittleEndian.Uint64(buffer))
+			if err != nil {
+				log.Println(err.Error())
+				sendPacket(client, 404, nil)
+			}
+			serial := createSerializer()
+			serial.String(username, 1)
+			sendPacket(client, 200, serial.buffer.Bytes())
 		default:
 		}
 	}
@@ -109,9 +182,9 @@ func handleSession(client net.Conn) {
 			return
 		}
 
-		parser := parserStruct{buffer, uint32(len(buffer)), 0}
+		parser := parserStruct{buffer, uint16(len(buffer)), 0}
 
-		if !(opCode == 4 || opCode == 5) {
+		if !(opCode == 4 || opCode == 5 || opCode == 10) {
 			fmt.Println("Session error, unauthorized")
 			sendPacket(client, 401, nil)
 			client.Close()
@@ -127,7 +200,7 @@ func handleSession(client net.Conn) {
 			client.Close()
 			return
 		}
-		username, err = parser.String(uint32(nLen))
+		username, err = parser.String(uint16(nLen))
 		if err != nil {
 			fmt.Println("Session error, bad request")
 			sendPacket(client, 400, nil)
@@ -145,7 +218,7 @@ func handleSession(client net.Conn) {
 			client.Close()
 			return
 		}
-		password, err = parser.Chunk(uint32(passLen))
+		password, err = parser.Chunk(uint16(passLen))
 		if err != nil {
 			fmt.Println("Session error, bad request")
 			sendPacket(client, 400, nil)
@@ -181,6 +254,21 @@ func handleSession(client net.Conn) {
 				sendPacket(client, 406, nil)
 				fmt.Println("User already exists", username)
 			}
+		} else if opCode == 10 {
+			var user userStruct
+			appDB.First(&user, "username = ?", username)
+			if reflect.DeepEqual(user, userStruct{}) {
+				sendPacket(client, 404, nil)
+				fmt.Println("Received NX auth from", username)
+			} else if bytes.Equal(hash[:], user.Hash[:]) {
+				sendPacket(client, 200, nil)
+				subscription[uint64(user.ID)] = client
+				fmt.Println("Received auth from", username)
+				break
+			} else {
+				sendPacket(client, 423, nil)
+				fmt.Println("Received wrong password from", username)
+			}
 		}
 	}
 
@@ -206,12 +294,16 @@ func listenClient(IP string, PORT string) int {
 	}
 }
 
-func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint32, opCode uint16, buffer []byte) {
+//
+// Packet reading
+//
+
+func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint16, opCode uint16, buffer []byte) {
 	//defer readRecover(client, &exitCode)
 	if timeout != 0 {
 		client.SetReadDeadline(time.Now().Add(time.Duration(timeout * int64(time.Second))))
 	}
-	dataLenB := make([]byte, 4)
+	dataLenB := make([]byte, 2)
 	_, err := client.Read(dataLenB)
 	if err != nil {
 		fmt.Println("Error in message receiving(len): " + err.Error())
@@ -219,7 +311,7 @@ func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint32, 
 		out_err = err
 		return
 	}
-	dataLen = binary.LittleEndian.Uint32(dataLenB)
+	dataLen = binary.LittleEndian.Uint16(dataLenB)
 	opCodeB := make([]byte, 2)
 	_, err = client.Read(opCodeB)
 	if err != nil {
@@ -245,21 +337,58 @@ func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint32, 
 	return
 }
 
-//func readRecover(client net.Conn, exitCode *int) {
-//	if r := recover(); r != nil {
-//		fmt.Println("Recovered from ", r)
-//		*exitCode = 1
-//		client.Close()
-//	}
-//}
+func readPacketFromSubscriber(id uint64, timeout int64) (out_err error, dataLen uint16, opCode uint16, buffer []byte) {
+	client, ok := subscription[id]
+	if !ok {
+		return errors.New("Now subscription available"), 0, 0, nil
+	}
+	if timeout != 0 {
+		client.SetReadDeadline(time.Now().Add(time.Duration(timeout * int64(time.Second))))
+	}
+	dataLenB := make([]byte, 2)
+	_, err := client.Read(dataLenB)
+	if err != nil {
+		fmt.Println("Error in message receiving(len): " + err.Error())
+		client.Close()
+		out_err = err
+		return
+	}
+	dataLen = binary.LittleEndian.Uint16(dataLenB)
+	opCodeB := make([]byte, 2)
+	_, err = client.Read(opCodeB)
+	if err != nil {
+		fmt.Println("Error in message receiving(opCode): " + err.Error())
+		client.Close()
+		out_err = err
+		return
+	}
+	opCode = binary.LittleEndian.Uint16(opCodeB)
+	if dataLen != 0 {
+		buffer = make([]byte, dataLen)
+		_, err = client.Read(buffer)
+		if err != nil {
+			fmt.Println("Error in message receiving(data): " + err.Error())
+			client.Close()
+			out_err = err
+			return
+		}
+	} else {
+		buffer = nil
+		return
+	}
+	return
+}
 
 func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 	var buffer bytes.Buffer
 	opCodeB := make([]byte, 2)
 	if data != nil {
-		lenB := make([]byte, 4)
+		lenB := make([]byte, 2)
 		length := len(data)
-		binary.LittleEndian.PutUint32(lenB, uint32(length))
+		if len(data) > 65535 {
+			return errors.New("Data is to big, packet split is not implemented")
+		}
+		binary.LittleEndian.PutUint16(lenB, uint16(length))
 		binary.LittleEndian.PutUint16(opCodeB, opCode)
 
 		buffer.Write(lenB)
@@ -272,7 +401,46 @@ func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 		}
 		return nil
 	} else {
-		lenB := []byte{0, 0, 0, 0}
+		lenB := []byte{0, 0}
+		binary.LittleEndian.PutUint16(opCodeB, opCode)
+
+		buffer.Write(lenB)
+		buffer.Write(opCodeB)
+		_, err := client.Write(buffer.Bytes())
+		if err != nil {
+			fmt.Println("Error in message sending: " + err.Error())
+			return err
+		}
+		return nil
+	}
+}
+func sendPacketToSubscriber(id uint64, opCode uint16, data []byte) error {
+	client, ok := subscription[id]
+	if !ok {
+		return errors.New("Now subscription available")
+	}
+	var buffer bytes.Buffer
+	opCodeB := make([]byte, 2)
+	if data != nil {
+		lenB := make([]byte, 2)
+		length := len(data)
+		if len(data) > 65535 {
+			return errors.New("Data is to big, packet split is not implemented")
+		}
+		binary.LittleEndian.PutUint16(lenB, uint16(length))
+		binary.LittleEndian.PutUint16(opCodeB, opCode)
+
+		buffer.Write(lenB)
+		buffer.Write(opCodeB)
+		buffer.Write(data)
+		_, err := client.Write(buffer.Bytes())
+		if err != nil {
+			fmt.Println("Error in message sending: " + err.Error())
+			return err
+		}
+		return nil
+	} else {
+		lenB := []byte{0, 0}
 		binary.LittleEndian.PutUint16(opCodeB, opCode)
 
 		buffer.Write(lenB)
@@ -298,6 +466,9 @@ func getUserIDbyName(buffer []byte) (uint64, error) {
 		userID uint64
 	)
 	nLen := buffer[0]
+	if int(nLen+1) > len(buffer) {
+		return 0, errors.New("Bad format")
+	}
 	name := string(buffer[1 : 1+nLen])
 	appDB.First(&user, "username = ?", name)
 	if reflect.DeepEqual(user, userStruct{}) {
@@ -308,6 +479,56 @@ func getUserIDbyName(buffer []byte) (uint64, error) {
 	}
 }
 
+func getNamebyUserID(id uint64) (string, error) {
+	var (
+		user     userStruct
+		username string
+	)
+	appDB.First(&user, "id = ?", id)
+	if reflect.DeepEqual(user, userStruct{}) {
+		return "", errors.New("User doesn't exists")
+	} else {
+		username = user.Username
+		return username, nil
+	}
+}
+
+func sendMessage(msg *msgStruct) {
+	serial := createSerializer()
+	serial.UInt64(msg.sender)
+	if msg.group == false {
+		serial.UInt64(msg.ID)
+		serial.UInt64(0)
+		serial.String(msg.message, 2)
+		err := sendPacketToSubscriber(msg.ID, 1, serial.buffer.Bytes())
+
+		err, _, opCode, _ := readPacketFromSubscriber(msg.ID, 0)
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+
+		switch opCode {
+		case 200:
+			return
+		case 400:
+			fmt.Println("Bad syntax???")
+			return
+		case 404:
+			fmt.Println("Wrong receipient")
+			return
+		default:
+			fmt.Println("Unknown response")
+			return
+		}
+
+	} else {
+		//serial.UInt64(0)
+		//serial.UInt64(msg.ID)
+		return
+	}
+}
+
 //
 //
 // Parser
@@ -315,8 +536,8 @@ func getUserIDbyName(buffer []byte) (uint64, error) {
 //
 type parserStruct struct {
 	data   []byte
-	length uint32
-	offset uint32
+	length uint16
+	offset uint16
 }
 
 func (obj *parserStruct) Byte() (byte, error) {
@@ -351,7 +572,7 @@ func (obj *parserStruct) UInt64() (uint64, error) {
 	return binary.LittleEndian.Uint64(obj.data[obj.offset : obj.offset+8]), nil
 }
 
-func (obj *parserStruct) String(len uint32) (string, error) {
+func (obj *parserStruct) String(len uint16) (string, error) {
 	if obj.offset+len > obj.length {
 		return "", errors.New("Offset is out of range")
 	}
@@ -359,7 +580,7 @@ func (obj *parserStruct) String(len uint32) (string, error) {
 	return string(obj.data[obj.offset : obj.offset+len]), nil
 }
 
-func (obj *parserStruct) Chunk(len uint32) ([]byte, error) {
+func (obj *parserStruct) Chunk(len uint16) ([]byte, error) {
 	if obj.offset+len > obj.length {
 		return nil, errors.New("Offset is out of range")
 	}
@@ -367,7 +588,7 @@ func (obj *parserStruct) Chunk(len uint32) ([]byte, error) {
 	return obj.data[obj.offset : obj.offset+len], nil
 }
 
-func incrementOffset(count uint32, obj *parserStruct) {
+func incrementOffset(count uint16, obj *parserStruct) {
 	obj.offset += count
 }
 
@@ -376,8 +597,22 @@ func incrementOffset(count uint32, obj *parserStruct) {
 // Serializer
 //
 //
+func createSerializer() serializerStruct {
+	var buffer bytes.Buffer
+	obj := serializerStruct{buffer}
+	return obj
+}
+
 type serializerStruct struct {
 	buffer bytes.Buffer
+}
+
+func (obj *serializerStruct) Byte(input byte) error {
+	err := obj.buffer.WriteByte(input)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (obj *serializerStruct) UInt16(input uint16) error {
