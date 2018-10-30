@@ -9,12 +9,12 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/eidolon/wordwrap"
+	"github.com/gotk3/gotk3/glib"
+
 	"github.com/gotk3/gotk3/pango"
 
 	"github.com/gotk3/gotk3/gdk"
@@ -42,28 +42,34 @@ var (
 
 	gtkAlive bool
 
-	wrapper wordwrap.WrapperFunc
+	mainWindow     gtk.Window
+	builder        *gtk.Builder
+	authWin        *gtk.Window
+	settingsWin    *gtk.Window
+	addGroupWin    *gtk.Window
+	messageText    *gtk.TextBuffer
+	messageOutput  *gtk.ListBox
+	сontactsList   *gtk.ListBox
+	messageScroll  *gtk.ScrolledWindow
+	stickerPop     *gtk.Popover
+	stickerList    *gtk.ListBox
+	stickerScroll  *gtk.ScrolledWindow
+	groupNameEntry *gtk.Entry
+	usernameLabel  *gtk.Label
 
-	mainWindow    gtk.Window
-	builder       *gtk.Builder
-	authWin       *gtk.Window
-	settingsWin   *gtk.Window
-	addGroupWin   *gtk.Window
-	messageText   *gtk.TextBuffer
-	messageOutput *gtk.ListBox
-	сontactsList  *gtk.ListBox
-	messageScroll *gtk.ScrolledWindow
-	stickerPop    *gtk.Popover
-	stickerList   *gtk.ListBox
+	stickerScrollAdj float64
+	stickerScrollUpp float64
 
 	usernames  map[uint64]string
 	userids    map[string]uint64
-	chats      map[uint64]chat
-	settings   map[string]string
-	stickerMap map[string]string
+	groupnames map[uint64]string
+	chats      map[uint64]chat        // [user_id]chat struct
+	settings   map[string]string      // [key]value
+	stickerBuf map[string]*gdk.Pixbuf // [filename]pixbuf
+
+	chatCount  uint64
 	online     bool
 	activeChat uint64
-
 	clUsername string
 	clID       uint64
 )
@@ -72,8 +78,9 @@ func main() {
 	chats = make(map[uint64]chat)
 	settings = make(map[string]string)
 	usernames = make(map[uint64]string)
+	groupnames = make(map[uint64]string)
 	userids = make(map[string]uint64)
-	stickerMap = make(map[string]string)
+	stickerBuf = make(map[string]*gdk.Pixbuf)
 
 	if parseSettings() != 0 {
 		return
@@ -87,13 +94,12 @@ func main() {
 	if initWindows() != 0 {
 		return
 	}
-	wrapper = wordwrap.Wrapper(40, false)
 
 	scanStickers()
 
 	connectToServer()
-	go gtk.Main()
 
+	go gtk.Main()
 	listenMessages()
 }
 
@@ -110,8 +116,12 @@ func initWindows() int {
 	mainWindow.Connect("destroy", func() {
 		gtkAlive = false
 		gtk.MainQuit()
-		connection.Close()
-		subscribtion.Close()
+		if connection != nil {
+			connection.Close()
+		}
+		if subscribtion != nil {
+			subscribtion.Close()
+		}
 	})
 	mainWindow.ShowAll()
 
@@ -147,6 +157,16 @@ func initWindows() int {
 	})
 
 	//
+	//Username Label
+	//
+	obj, err = builder.GetObject("UsernameLabel")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 2
+	}
+	usernameLabel = obj.(*gtk.Label)
+
+	//
 	//MessageEntry
 	//
 	obj, err = builder.GetObject("MessageText")
@@ -164,6 +184,8 @@ func initWindows() int {
 			}
 			if str != "" {
 				sendMessage(str, true)
+			} else {
+				glib.IdleAdd(clearText)
 			}
 		}
 	})
@@ -204,6 +226,8 @@ func initWindows() int {
 	stickersBtn := obj.(*gtk.EventBox)
 	stickersBtn.Connect("button-release-event", func() {
 		stickerPop.ShowAll()
+		adj, _ := gtk.AdjustmentNew(stickerScrollAdj, 0, stickerScrollUpp, 0, 0, 0)
+		stickerScroll.SetVAdjustment(adj)
 	})
 
 	//
@@ -328,13 +352,12 @@ func initWindows() int {
 			fmt.Print(isGroup)
 			return
 		}
-		ID, err := strconv.ParseUint(nameSplit[1], 10, 64)
+		chatID, err := strconv.ParseUint(nameSplit[1], 10, 64)
 		if err != nil {
 			return
 		}
-
-		redrawChat(activeChat, ID)
-		activeChat = ID
+		redrawChat(activeChat, chatID)
+		activeChat = chatID
 
 	})
 
@@ -367,7 +390,7 @@ func initWindows() int {
 			popupError("Error: "+err.Error(), "Error")
 			return
 		}
-		err = addContact(0, str)
+		err = addContact(0, str, 0)
 		if err != nil {
 			if err == io.EOF {
 				connection.Close()
@@ -379,6 +402,7 @@ func initWindows() int {
 			popupError("Error: "+err.Error(), "Error")
 			return
 		}
+		addContactEntry.SetText("")
 	})
 
 	//
@@ -397,7 +421,7 @@ func initWindows() int {
 	//
 	//GroupWindow
 	//
-	obj, err = builder.GetObject("AddGroup")
+	obj, err = builder.GetObject("CreateGroup")
 	if err != nil {
 		log.Fatal("Error in object getting:", err)
 		return 2
@@ -409,6 +433,33 @@ func initWindows() int {
 		return true
 	})
 	addGroupWin.SetPosition(gtk.WIN_POS_CENTER_ON_PARENT)
+
+	//
+	//GroupButton
+	//
+	obj, err = builder.GetObject("CreateGroupBtn")
+	if err != nil {
+		log.Fatal("Error in object getting:", err)
+		return 2
+	}
+
+	createGroupBtn := obj.(*gtk.Button)
+	createGroupBtn.Connect("clicked", func() {
+		err := createGroup()
+		if err != nil {
+			popupError("Error: "+err.Error(), "Error")
+		}
+	})
+
+	//
+	//GroupButton
+	//
+	obj, err = builder.GetObject("GroupName")
+	if err != nil {
+		log.Fatal("Error in object getting:", err)
+		return 2
+	}
+	groupNameEntry = obj.(*gtk.Entry)
 
 	//
 	//Popover Stiker
@@ -429,6 +480,18 @@ func initWindows() int {
 		return 2
 	}
 	stickerList = obj.(*gtk.ListBox)
+
+	//
+	//StikerScroll
+	//
+	obj, err = builder.GetObject("StickerScroll")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 2
+	}
+	stickerScroll = obj.(*gtk.ScrolledWindow)
+	stickerScrollAdj = stickerScroll.GetVAdjustment().GetValue()
+	stickerScrollUpp = stickerScroll.GetVAdjustment().GetUpper()
 
 	return 0
 }
@@ -601,22 +664,66 @@ func sendRegisterOrAuthAndSubscribe(username, password string, auth bool) error 
 	buffer.Write(usernameB)
 	buffer.WriteByte(byte(pLen))
 	buffer.Write(passwordB)
+	var op uint16
 	if auth {
-		err := sendPacket(connection, 5, buffer.Bytes())
-		if err != nil {
-			return err
-		}
+		op = 5
 	} else {
-		err := sendPacket(connection, 4, buffer.Bytes())
-		if err != nil {
-			return err
-		}
+		op = 4
 	}
-	err := sendPacket(subscribtion, 10, buffer.Bytes())
+
+	err := sendPacket(connection, op, buffer.Bytes())
 	if err != nil {
 		return err
 	}
-	return nil
+
+	err, _, opCode, _ := readPacket(connection, 5)
+	if err != nil {
+		return errors.New("Server not responding")
+	}
+
+	switch opCode {
+	case 200:
+
+	case 404:
+		return errors.New("404: Not found. \nUser doesn't exists")
+	case 406:
+		return errors.New("406: Not acceptable. \nUser already exists")
+	case 423:
+		return errors.New("423: Locked. Wrong password")
+	case 409:
+		return errors.New("409: Conflict. User is already online")
+	case 400:
+		return errors.New("400: Bad request")
+	default:
+		return errors.New(fmt.Sprint("Unhandled server response - ", opCode))
+	}
+
+	err = sendPacket(subscribtion, 10, buffer.Bytes())
+	if err != nil {
+		return err
+	}
+
+	err, _, opCode, _ = readPacket(subscribtion, 5)
+	if err != nil {
+		return errors.New("Server not responding")
+	}
+
+	switch opCode {
+	case 200:
+		return nil
+	case 404:
+		return errors.New("404: Not found. \nUser doesn't exists")
+	case 406:
+		return errors.New("406: Not acceptable. \nUser already exists")
+	case 423:
+		return errors.New("423: Locked. Wrong password")
+	case 409:
+		return errors.New("409: Conflict. User is already online")
+	case 400:
+		return errors.New("400: Bad request")
+	default:
+		return errors.New(fmt.Sprint("Unhandled server response - ", opCode))
+	}
 }
 
 func setOnline(_online bool) {
@@ -684,31 +791,15 @@ func establishConnetcion(auth bool, authPass, authUser *gtk.Entry) error {
 		subscribtion = nil
 		return err
 	}
-	err, _, opCode, _ := readPacket(connection, 5)
+	clUsername = username
+	usernameLabel.SetText(username)
+	clID, err = getUserID(clUsername)
 	if err != nil {
-		return errors.New("Server not responding")
+		return err
 	}
-	switch opCode {
-	case 200:
-		clUsername = username
-		clID, err = getUserID(clUsername)
-		if err != nil {
-			return err
-		}
-		setOnline(true)
-		authWin.Hide()
-		return nil
-	case 404:
-		return errors.New("404: Not found. \nUser doesn't exists")
-	case 406:
-		return errors.New("406: Not acceptable. \nUser already exists")
-	case 423:
-		return errors.New("423: Locked. Wrong password")
-	case 400:
-		return errors.New("400: Bad request")
-	default:
-		return errors.New(fmt.Sprint("Unhandled server response - ", opCode))
-	}
+	setOnline(true)
+	authWin.Hide()
+	return nil
 }
 
 func sendMessage(str string, clear bool) {
@@ -717,11 +808,11 @@ func sendMessage(str string, clear bool) {
 		serial := createSerializer()
 		serial.UInt64(clID)
 		if chats[activeChat].group == false {
-			serial.UInt64(activeChat)
+			serial.UInt64(chats[activeChat].id)
 			serial.UInt64(0)
 		} else {
 			serial.UInt64(0)
-			serial.UInt64(activeChat)
+			serial.UInt64(chats[activeChat].id)
 		}
 		msgLen := len([]byte(str))
 		if msgLen > 65535 {
@@ -747,11 +838,10 @@ func sendMessage(str string, clear bool) {
 			messageOutput.Add(row)
 			messageOutput.ShowAll()
 
-			adj, _ := gtk.AdjustmentNew(0xffffffff, 0, 0xffffffff, 0, 0, 0)
-			messageScroll.SetVAdjustment(adj)
+			scrollDown()
 
 			if clear {
-				go clearText()
+				glib.IdleAdd(clearText)
 			}
 			return
 		case 400:
@@ -770,21 +860,114 @@ func clearText() {
 	messageText.SetText("")
 }
 
-func addContact(isGroup int, contactName string) error {
-	userID, err := getUserID(contactName)
+func addContact(isGroup int, contactName string, id uint64) error {
+	if isGroup == 0 {
+		if id == 0 {
+			var err error
+			id, err = getUserID(contactName)
+			if err != nil {
+				return err
+			}
+		}
+		fmt.Println(id)
+		if id == clID {
+			return errors.New("It's you!")
+		}
+		_, oldChat := getChatByID(id, false)
+		if oldChat.id != 0 {
+			return errors.New("User already in contacts")
+		}
+		chatCount++
+		addToContactLists(isGroup, chatCount, id, contactName)
+	} else {
+		_, oldChat := getChatByID(id, true)
+		if oldChat.id != 0 {
+			return errors.New("Group chat already in contacts")
+		}
+
+		chatCount++
+		addToContactLists(isGroup, chatCount, id, contactName)
+	}
+	return nil
+}
+
+func createGroup() error {
+	serial := createSerializer()
+	text, _ := groupNameEntry.GetText()
+
+	err := serial.String(text, 1)
 	if err != nil {
 		return err
 	}
-	if userID == clID {
-		return errors.New("It's you!")
+
+	err = sendPacket(connection, 2, serial.buffer.Bytes())
+	if err != nil {
+		return err
 	}
 
-	if _, ok := chats[userID]; ok {
-		return errors.New("User already in contacts")
+	err, dataLen, opCode, buf := readPacket(connection, 5)
+	if err != nil {
+		return err
+	}
+	switch opCode {
+	case 200:
+		parser := parserStruct{buf, dataLen, 0}
+		id, err := parser.UInt64()
+		if err != nil {
+			return errors.New("Parse error: " + err.Error())
+		}
+		groupname, err := getGroupname(id)
+		if err != nil {
+			return errors.New("Get error: " + err.Error())
+		}
+		addContact(1, groupname, id)
+	case 400:
+		return errors.New("400: Bad syntax")
+	case 500:
+		return errors.New("500: Server error")
+	case 409:
+		return errors.New("409: Conflict. Group with this name already exists")
 	}
 
-	addToContactLists(isGroup, userID, contactName)
 	return nil
+}
+
+func getGroupname(id uint64) (string, error) {
+	if v, ok := groupnames[id]; ok {
+		return v, nil
+	}
+
+	serial := createSerializer()
+	serial.UInt64(id)
+
+	err := sendPacket(connection, 3, serial.buffer.Bytes())
+	if err != nil {
+		return "", err
+	}
+
+	err, len, opCode, recieved := readPacket(connection, 0)
+
+	switch opCode {
+	case 200:
+		parser := parserStruct{recieved, len, 0}
+		nLen, err := parser.Byte()
+		if err != nil {
+			return "", err
+		}
+		contactName, err := parser.String(uint16(nLen))
+		if err != nil {
+			return "", err
+		}
+		groupnames[id] = contactName
+
+		return contactName, nil
+	case 404:
+		return "", errors.New("404: Not found. \nUser doesn't exists")
+	case 400:
+		return "", errors.New("400: Bad request")
+	default:
+		return "", errors.New(fmt.Sprint("Unhandled server response - ", opCode))
+	}
 }
 
 func getUserID(contactName string) (uint64, error) {
@@ -883,17 +1066,15 @@ func listenMessages() {
 			if !gtkAlive {
 				return
 			}
-			time.Sleep(3 * time.Second)
+			time.Sleep(1 * time.Second)
 			continue
 		}
+		log.Println("Listen for msg's")
 		err, dataLen, opCode, data = readPacket(subscribtion, 0)
 		if err != nil {
-			popupError("Subscription fail", "Error")
-			connection.Close()
-			connection = nil
-			subscribtion.Close()
-			subscribtion = nil
+			log.Println("Error: Subscription fail")
 			setOnline(false)
+			continue
 		}
 		switch opCode {
 		case 1:
@@ -936,24 +1117,23 @@ func listenMessages() {
 					break
 				}
 				row := createRow(senderID, username, msg, false)
-				if _, ok := chats[senderID]; !ok {
-					username, err = getUsername(senderID)
+				_, destChat := getChatByID(senderID, false)
+				if destChat.id == 0 {
 					if err != nil {
 						fmt.Printf("Error: " + err.Error())
-
 						break
 					}
-					addToContactLists(0, senderID, username)
+					chatCount++
+					addToContactLists(0, chatCount, senderID, username)
 				}
-				chatEntry := chats[senderID]
-				chatEntry.messages = append(chatEntry.messages, message{senderID, username, msg, row})
-				chats[senderID] = chatEntry
-				if senderID == activeChat {
+				key, destChat := getChatByID(senderID, false)
+				destChat.messages = append(destChat.messages, message{senderID, username, msg, row})
+				chats[key] = destChat
+				if key == activeChat {
 					messageOutput.Add(row)
 					messageOutput.ShowAll()
 
-					adj, _ := gtk.AdjustmentNew(0xffffffff, 0, 0xffffffff, 0, 0, 0)
-					messageScroll.SetVAdjustment(adj)
+					glib.IdleAdd(scrollDown, nil)
 				}
 			}
 			sendPacket(subscribtion, 501, nil)
@@ -1009,27 +1189,27 @@ func popupInfo(content, title string) {
 	popup.ShowAll()
 }
 
-func addToContactLists(isGroup int, ID uint64, verbose string) {
+func addToContactLists(isGroup int, chatID, ID uint64, verbose string) {
 	row, _ := gtk.ListBoxRowNew()
 
-	chats[ID] = chat{false, verbose, ID, make([]message, 0)}
+	if isGroup == 0 {
+		chats[chatID] = chat{false, verbose, ID, make([]message, 0)}
+	} else {
+		chats[chatID] = chat{true, verbose, ID, make([]message, 0)}
+	}
 
 	label, _ := gtk.LabelNew(verbose)
 	label.SetXAlign(0)
 	label.SetMarginStart(20)
 	label.SetSizeRequest(0, 66)
 	row.Add(label)
-	row.SetName(strconv.Itoa(isGroup) + " " + strconv.FormatUint(ID, 10))
+	row.SetName(strconv.Itoa(isGroup) + " " + strconv.FormatUint(chatID, 10))
 
 	сontactsList.Insert(row, 0)
 	сontactsList.ShowAll()
-
-	//for i := 0; i < chats.Len(); i++ {
-	//
-	//	}
 }
 
-func redrawChat(prev, next uint64) {
+func redrawChat(prev, next uint64) { //, isPreviousChatGroup bool) {
 	if prev == next {
 		return
 	}
@@ -1041,19 +1221,21 @@ func redrawChat(prev, next uint64) {
 		}
 		fmt.Println(chatPrevMsg)
 	}
-	fmt.Println(prev, next)
 
 	chatNextMsg := chats[next].messages
 
 	for i := range chatNextMsg {
-		username, _ := getUsername(chatNextMsg[i].senderID)
-		row := createRow(chatNextMsg[i].senderID, username, chatNextMsg[i].text, chats[activeChat].group)
+		row := chatNextMsg[i].row
 
 		messageOutput.Add(row)
 		messageOutput.ShowAll()
 
 		chatNextMsg[i].row = row
 	}
+	scrollDown()
+}
+
+func scrollDown() {
 	adj, _ := gtk.AdjustmentNew(0xffffffff, 0, 0xffffffff, 0, 0, 0)
 	messageScroll.SetVAdjustment(adj)
 }
@@ -1064,17 +1246,11 @@ func createRow(sender uint64, name string, str string, group bool) *gtk.ListBoxR
 		if str[0:9] == "/sticker:" && !group {
 			var image *gtk.Image
 
-			if _, err := os.Stat("Stickers/" + str[9:]); os.IsNotExist(err) {
+			if v, ok := stickerBuf[str[9:]]; ok {
+				image, _ = gtk.ImageNewFromPixbuf(v)
 
-			} else {
-				image, _ = gtk.ImageNew()
-
-				image.SetFromFile("Stickers/" + str[9:])
-
-				image.SetPixelSize(2)
-
-				image.SetMarginTop(12)
-				image.SetMarginBottom(12)
+				image.SetMarginTop(6)
+				image.SetMarginBottom(6)
 
 				if sender == clID {
 					image.SetMarginEnd(10)
@@ -1123,7 +1299,6 @@ func scanStickers() {
 		popupError("Error while loading stickers(folders)", "Error")
 		return
 	}
-	id := 0
 	for i := range dirs {
 		if dirs[i].IsDir() {
 			files, err := ioutil.ReadDir("./Stickers/" + dirs[i].Name())
@@ -1144,47 +1319,65 @@ func scanStickers() {
 			stickerList.Add(row)
 
 			var (
-				box   *gtk.Box
-				pxbuf *gdk.Pixbuf
-				image *gtk.Image
-				eBox  *gtk.EventBox
+				box        *gtk.Box
+				pxbuf      *gdk.Pixbuf
+				pxbufSmall *gdk.Pixbuf
+				image      *gtk.Image
+				eBox       *gtk.EventBox
+				pos        int
 			)
 
 			for j := range files {
-				id++
-				if j%4 == 0 {
+				if pos%4 == 0 {
 					box, _ = gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 0)
 				}
-				pxbuf, _ = gdk.PixbufNewFromFile("./Stickers/" + dirs[i].Name() + "/" + files[j].Name())
-				pxbuf, _ = pxbuf.ScaleSimple(64, 64, gdk.INTERP_BILINEAR)
+				pxbuf, err = gdk.PixbufNewFromFile("./Stickers/" + dirs[i].Name() + "/" + files[j].Name())
+				if err != nil {
+					log.Println("error in sticker loading")
+					continue
+				}
 
-				image, _ = gtk.ImageNewFromPixbuf(pxbuf)
+				stickerBuf[dirs[i].Name()+"/"+files[j].Name()] = pxbuf
+
+				pxbufSmall, _ = pxbuf.ScaleSimple(64, 64, gdk.INTERP_BILINEAR)
+				image, err = gtk.ImageNewFromPixbuf(pxbufSmall)
 
 				eBox, _ = gtk.EventBoxNew()
 				eBox.Add(image)
 
-				eBox.SetName(strconv.Itoa(id))
-				stickerMap[strconv.Itoa(id)] = dirs[i].Name() + "/" + files[j].Name()
+				eBox.SetName(dirs[i].Name() + "/" + files[j].Name())
 
 				eBox.Connect("button-release-event", func(obj *gtk.EventBox) {
 					name, err := obj.GetName()
 					if err != nil {
 						popupError("Error in sticker sending (Can't get id through EventBox name)", "Error")
 					}
-					sendMessage("/sticker:"+stickerMap[name], false)
+					sendMessage("/sticker:"+name, false)
+					stickerScrollAdj = stickerScroll.GetVAdjustment().GetValue()
+					stickerScrollUpp = stickerScroll.GetVAdjustment().GetUpper()
+					stickerPop.Hide()
 				})
 
 				box.PackStart(eBox, true, true, 0)
 
-				if (j-3)%4 == 0 || j == len(files)-1 {
+				if (pos+1)%4 == 0 || j == len(files)-1 {
 					row, _ := gtk.ListBoxRowNew()
 					row.Add(box)
 					stickerList.Add(row)
 				}
+				pos++
 			}
 		}
 	}
-	//stickerList
+}
+
+func getChatByID(id uint64, isGroup bool) (uint64, chat) {
+	for k, v := range chats {
+		if v.id == id && v.group == isGroup {
+			return k, v
+		}
+	}
+	return 0, chat{}
 }
 
 //
@@ -1307,11 +1500,17 @@ func (obj *serializerStruct) String(input string, lenLen int) error {
 	inputB := []byte(input)
 	len := len(inputB)
 	if lenLen == 1 {
+		if len > 255 {
+			return errors.New("String is too long")
+		}
 		err := obj.buffer.WriteByte(byte(len))
 		if err != nil {
 			return err
 		}
 	} else if lenLen == 2 {
+		if len > 65535 {
+			return errors.New("String is too long")
+		}
 		err := obj.UInt16(uint16(len))
 		if err != nil {
 			return err

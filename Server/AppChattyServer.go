@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/jinzhu/gorm"
@@ -41,18 +42,25 @@ const (
 
 //DB Structures
 type userStruct struct {
-	gorm.Model
+	ID       uint64 `gorm:"primary_key"`
 	Username string
 	Hash     []byte
 }
 
 type groupStruct struct {
-	gorm.Model
+	ID      uint64 `gorm:"primary_key"`
+	OwnerID uint64
+	Verbose string
+}
+
+type groupMemberStruct struct {
+	ID      uint64 `gorm:"primary_key"`
+	UserID  uint64
+	GroupID uint64
+	OwnerID uint64
 }
 
 func main() {
-	none = []byte{0xff, 0xff, 0xff, 0xff}
-	none64 = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 	//Initialization
 	var err error
@@ -63,6 +71,9 @@ func main() {
 	defer appDB.Close()
 
 	appDB.AutoMigrate(&userStruct{})
+	appDB.AutoMigrate(&groupStruct{})
+	appDB.AutoMigrate(&groupMemberStruct{})
+	appDB.Create(&userStruct{Username: "System", Hash: []byte{0, 0, 0, 0}, ID: 1})
 	subscription = make(map[uint64]net.Conn)
 	users = make(map[uint64]net.Conn)
 
@@ -70,7 +81,7 @@ func main() {
 	listenClient(ADDRESS, PORT)
 }
 
-func handlePacket(client net.Conn) {
+func handlePacket(clID uint64, client net.Conn) {
 	var (
 		err     error
 		dataLen uint16
@@ -81,8 +92,17 @@ func handlePacket(client net.Conn) {
 	for {
 		err, dataLen, opCode, buffer = readPacket(client, 0)
 		if err != nil {
-			sendPacket(client, 400, nil)
 			log.Println(err.Error())
+			client.Close()
+			if subscription[clID] != nil {
+				subscription[clID].Close()
+				subscription[clID] = nil
+			}
+
+			if users[clID] != nil {
+				users[clID].Close()
+				users[clID] = nil
+			}
 			return
 		}
 		fmt.Println(dataLen, opCode, buffer)
@@ -118,7 +138,7 @@ func handlePacket(client net.Conn) {
 			var msgObj msgStruct
 			if userID != 0 {
 				var user userStruct
-				appDB.First(&user, "id = ?", uint(userID))
+				appDB.First(&user, "id = ?", userID)
 				if reflect.DeepEqual(user, userStruct{}) {
 					sendPacket(client, 404, nil)
 					continue
@@ -126,13 +146,67 @@ func handlePacket(client net.Conn) {
 				sendPacket(client, 200, nil)
 				msgObj = msgStruct{users[userID], msg, false, userID, senderID}
 			} else {
-				msgObj = msgStruct{users[groupID], msg, true, groupID, senderID}
+				var group groupStruct
+				appDB.First(&group, "id = ?", groupID)
+				if reflect.DeepEqual(group, groupStruct{}) {
+					sendPacket(client, 404, nil)
+					continue
+				}
+				sendPacket(client, 200, nil)
+
+				if msg[:5] == "/add " {
+
+					addID, err := getUserIDbyName([]byte(msg[5:]))
+					if err != nil {
+						//go sendMessage{ }
+
+					} else {
+						appDB.Create(&groupMemberStruct{UserID: addID, GroupID: group.ID, OwnerID: group.OwnerID})
+					}
+				}
+
+				msgObj = msgStruct{nil, msg, true, groupID, senderID}
 			}
 
-			go sendMessage(&msgObj)
+			go sendMessage(&msgObj, buffer)
 
+		case 2:
+			groupID, err := createGroup(clID, buffer, dataLen)
+			if err != nil {
+				if err.Error() == "409" {
+					sendPacket(client, 409, nil)
+					continue
+				} else {
+					sendPacket(client, 400, nil)
+					continue
+				}
+			}
+			if groupID == 0 {
+				sendPacket(client, 500, nil)
+				continue
+			} else {
+				serial := createSerializer()
+				err := serial.UInt64(groupID)
+				if err != nil {
+					sendPacket(client, 500, nil)
+					continue
+				}
+				sendPacket(client, 200, serial.buffer.Bytes())
+			}
+		case 3:
+			if len(buffer) != 8 {
+				sendPacket(client, 400, nil)
+			}
+			groupname, err := getGroupNamebyID(binary.LittleEndian.Uint64(buffer))
+			if err != nil {
+				log.Println(err.Error())
+				sendPacket(client, 404, nil)
+			}
+			serial := createSerializer()
+			serial.String(groupname, 1)
+			sendPacket(client, 200, serial.buffer.Bytes())
 		case 6:
-			id, err := getUserIDbyName(buffer)
+			id, err := getUserIDbyName(buffer[1:])
 			if err != nil {
 				log.Println(err.Error())
 				if err.Error() == "Bad format" {
@@ -173,6 +247,7 @@ func handleSession(client net.Conn) {
 		passLen  byte
 		password []byte
 		hash     [32]byte
+		id       uint64
 	)
 
 	for {
@@ -229,13 +304,17 @@ func handleSession(client net.Conn) {
 		if opCode == 5 {
 			var user userStruct
 			appDB.First(&user, "username = ?", username)
-			if reflect.DeepEqual(user, userStruct{}) {
+			if isOnline(uint64(user.ID)) {
+				sendPacket(client, 409, nil)
+				return
+			} else if reflect.DeepEqual(user, userStruct{}) {
 				sendPacket(client, 404, nil)
 				fmt.Println("Received NX auth from", username)
 			} else if bytes.Equal(hash[:], user.Hash[:]) {
-				sendPacket(client, 200, nil)
 				users[uint64(user.ID)] = client
+				sendPacket(client, 200, nil)
 				fmt.Println("Received auth from", username)
+				id = uint64(user.ID)
 				break
 			} else {
 				sendPacket(client, 423, nil)
@@ -244,11 +323,15 @@ func handleSession(client net.Conn) {
 		} else if opCode == 4 {
 			var user userStruct
 			appDB.First(&user, "username = ?", username)
-			if reflect.DeepEqual(user, userStruct{}) {
+			if isOnline(uint64(user.ID)) {
+				sendPacket(client, 409, nil)
+				return
+			} else if reflect.DeepEqual(user, userStruct{}) {
 				fmt.Println("Received register from", username)
 				appDB.Create(&userStruct{Username: username, Hash: hash[:]})
 				sendPacket(client, 200, nil)
 				users[uint64(user.ID)] = client
+				id = uint64(user.ID)
 				break
 			} else {
 				sendPacket(client, 406, nil)
@@ -257,13 +340,17 @@ func handleSession(client net.Conn) {
 		} else if opCode == 10 {
 			var user userStruct
 			appDB.First(&user, "username = ?", username)
-			if reflect.DeepEqual(user, userStruct{}) {
+			if isOnline(uint64(user.ID)) {
+				sendPacket(client, 409, nil)
+				return
+			} else if reflect.DeepEqual(user, userStruct{}) {
 				sendPacket(client, 404, nil)
 				fmt.Println("Received NX auth from", username)
 			} else if bytes.Equal(hash[:], user.Hash[:]) {
 				sendPacket(client, 200, nil)
 				subscription[uint64(user.ID)] = client
-				fmt.Println("Received auth from", username)
+				fmt.Println("Received subscribe from", username)
+				id = uint64(user.ID)
 				break
 			} else {
 				sendPacket(client, 423, nil)
@@ -272,7 +359,7 @@ func handleSession(client net.Conn) {
 		}
 	}
 
-	handlePacket(client)
+	handlePacket(id, client)
 }
 
 func listenClient(IP string, PORT string) int {
@@ -340,7 +427,7 @@ func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint16, 
 func readPacketFromSubscriber(id uint64, timeout int64) (out_err error, dataLen uint16, opCode uint16, buffer []byte) {
 	client, ok := subscription[id]
 	if !ok {
-		return errors.New("Now subscription available"), 0, 0, nil
+		return errors.New("No subscription available"), 0, 0, nil
 	}
 	if timeout != 0 {
 		client.SetReadDeadline(time.Now().Add(time.Duration(timeout * int64(time.Second))))
@@ -416,8 +503,8 @@ func sendPacket(client net.Conn, opCode uint16, data []byte) error {
 }
 func sendPacketToSubscriber(id uint64, opCode uint16, data []byte) error {
 	client, ok := subscription[id]
-	if !ok {
-		return errors.New("Now subscription available")
+	if !ok || client == nil {
+		return errors.New("No subscription available")
 	}
 	var buffer bytes.Buffer
 	opCodeB := make([]byte, 2)
@@ -454,22 +541,44 @@ func sendPacketToSubscriber(id uint64, opCode uint16, data []byte) error {
 	}
 }
 
+func addUserToGroup() {
+
+}
+
 //
 //
 //packet Handle Functions
 //
 //
 
+func createGroup(clID uint64, buffer []byte, dataLen uint16) (uint64, error) { //returns groupID
+	parser := parserStruct{buffer, dataLen, 0}
+	nLen, err := parser.Byte()
+	if err != nil {
+		return 0, errors.New("400")
+	}
+	groupName, err := parser.String(uint16(nLen))
+	if err != nil {
+		return 0, errors.New("400")
+	}
+	var group groupStruct
+	appDB.First(&group, "verbose = ?", groupName)
+	if reflect.DeepEqual(group, groupStruct{}) {
+		appDB.Create(&groupStruct{OwnerID: clID, Verbose: groupName})
+		appDB.First(&group, "verbose = ?", groupName)
+		appDB.Create(&groupMemberStruct{OwnerID: clID, UserID: clID, GroupID: group.ID})
+		return uint64(group.ID), nil
+	} else {
+		return 0, errors.New("409")
+	}
+}
+
 func getUserIDbyName(buffer []byte) (uint64, error) {
 	var (
 		user   userStruct
 		userID uint64
 	)
-	nLen := buffer[0]
-	if int(nLen+1) > len(buffer) {
-		return 0, errors.New("Bad format")
-	}
-	name := string(buffer[1 : 1+nLen])
+	name := string(buffer)
 	appDB.First(&user, "username = ?", name)
 	if reflect.DeepEqual(user, userStruct{}) {
 		return userID, errors.New("User doesn't exists")
@@ -493,7 +602,7 @@ func getNamebyUserID(id uint64) (string, error) {
 	}
 }
 
-func sendMessage(msg *msgStruct) {
+func sendMessage(msg *msgStruct, buffer []byte) {
 	serial := createSerializer()
 	serial.UInt64(msg.sender)
 	if msg.group == false {
@@ -523,10 +632,49 @@ func sendMessage(msg *msgStruct) {
 		}
 
 	} else {
-		//serial.UInt64(0)
-		//serial.UInt64(msg.ID)
+		var userID uint64
+		rows, err := appDB.Exec("SELECT user_id FROM group_member_structs WHERE group_id = " + strconv.FormatUint(msg.ID, 10)).Rows()
+
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+		for rows.Next() {
+			err = rows.Scan(&userID)
+			if err != nil {
+				fmt.Print(err.Error())
+			}
+			fmt.Println(userID)
+		}
 		return
 	}
+}
+
+func getGroupNamebyID(id uint64) (string, error) {
+	var (
+		group groupStruct
+		name  string
+	)
+	appDB.First(&group, "id = ?", id)
+	if reflect.DeepEqual(group, groupStruct{}) {
+		return "", errors.New("User doesn't exists")
+	} else {
+		name = group.Verbose
+		return name, nil
+	}
+}
+
+//
+//
+// etc
+//
+//
+
+func isOnline(user uint64) bool {
+	if subscription[user] != nil {
+		return true
+	}
+	return false
 }
 
 //

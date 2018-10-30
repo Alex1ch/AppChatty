@@ -19,6 +19,21 @@ Each packet has a structure defined below. Each packet should begin with `uint16
 - MessageLen `uint16`
 - MessageContent `utf8`
 
+#### 2: Create Group. Data:
+- NameLen `byte`
+- Name `utf8`
+
+Responses:
+- 406: Not Acceptable. No data. Name is taken.
+- 200: OK. Data: ChatID `ChatID`
+
+#### 3: Get Group Name by ID. Data:
+- UserID `uint64`
+
+Response 404 or 200 with data:
+- nameLen `byte`
+- name `utf8` 
+
 #### 4: Register. Data:
 - NameLen `byte`
 - Name `utf8`
@@ -45,12 +60,6 @@ Response 404 or 200 with data:
 - nameLen `byte`
 - name `utf8` 
 
-#### 8: Get Chat History Exists. Data:
-- UserID `uint64`
-- GroupID `uint64`
-- Offset `uint32`
-- Count `uint32`
-
 #### 10: Subscription Connection. Data:
 - NameLen `byte`
 - Name `utf8`
@@ -58,9 +67,11 @@ Response 404 or 200 with data:
 - Password `utf8`
 
 
-### List of responses: 
-- 200: OK. No data.
+### List of used responses: 
+- 200: OK. 
+- 400: Bad syntax.
 - 401: Unauthorized. No data.
-- 404: Not found. No data. Used to notify that user doesn't exist.
-- 406: Not Acceptable. No data. Used to notify that data is not valid.
-- 423: Locked. No data. Used to notify a user that password is wrong.
+- 404: Not found. No data. Used in auth to notify that user doesn't exist.
+- 406: Not Acceptable. No data. Used in registration to notify that data is not valid.
+- 409: Conflict. No data. Used to notify that user already connected.
+- 423: Locked. No data. Used in auth to notify a user that password is wrong.
