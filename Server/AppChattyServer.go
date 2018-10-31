@@ -33,7 +33,7 @@ var (
 
 const (
 	//ADDRESS Address of the Server
-	ADDRESS = "192.168.57.2"
+	ADDRESS = "0.0.0.0"
 	//PORT Listen port for the Server
 	PORT = "1237"
 	//BUFFERSIZE Size of the tcp buffer
@@ -54,10 +54,10 @@ type groupStruct struct {
 }
 
 type groupMemberStruct struct {
-	ID      uint64 `gorm:"primary_key"`
-	UserID  uint64
-	GroupID uint64
-	OwnerID uint64
+	ID       uint64 `gorm:"primary_key"`
+	UserID   uint64
+	GroupID  uint64
+	Username string
 }
 
 func main() {
@@ -135,6 +135,7 @@ func handlePacket(clID uint64, client net.Conn) {
 			}
 
 			var msgObj msgStruct
+			var groupMem groupMemberStruct
 			if userID != 0 {
 				var user userStruct
 				appDB.First(&user, "id = ?", userID)
@@ -156,6 +157,21 @@ func handlePacket(clID uint64, client net.Conn) {
 				msgObj = msgStruct{nil, msg, true, groupID, senderID}
 
 				if len(msg) > 5 {
+					if msg[:6] == "/leave" {
+						if clID == group.OwnerID {
+							go sendSystemMessageToUserInGroup(&msgStruct{nil, "You can't leave group without owner, use /grant and then /leave", true, groupID, 1}, clID)
+							continue
+						} else {
+							appDB.First(&groupMem, "group_id = ? AND user_id = ?", groupID, clID)
+							if groupMem.ID != 0 {
+								appDB.Delete(groupMemberStruct{}, "group_id = ? AND user_id = ?", groupID, clID)
+								msgObj = msgStruct{nil, groupMem.Username + " left the group", true, groupID, 1}
+							} else {
+								go sendSystemMessageToUserInGroup(&msgStruct{nil, "You are not in the group", true, groupID, 1}, clID)
+								continue
+							}
+						}
+					}
 					if msg[:5] == "/add " {
 						username := msg[5:]
 
@@ -169,14 +185,105 @@ func handlePacket(clID uint64, client net.Conn) {
 							go sendSystemMessageToUserInGroup(&msgStruct{nil, username + " is doesn't exists", true, groupID, 1}, clID)
 							continue
 						} else {
-							var groupMem groupMemberStruct
 							appDB.First(&groupMem, "group_id = ? AND user_id = ?", groupID, addID)
 							if groupMem.ID == 0 {
-								appDB.Create(&groupMemberStruct{UserID: addID, GroupID: group.ID, OwnerID: group.OwnerID})
+								appDB.Create(&groupMemberStruct{UserID: addID, GroupID: group.ID, Username: username})
 								msgObj = msgStruct{nil, username + " was added to the group", true, groupID, 1}
 							} else {
 								go sendSystemMessageToUserInGroup(&msgStruct{nil, username + " already in group", true, groupID, 1}, clID)
 								continue
+							}
+						}
+					}
+				}
+
+				if len(msg) > 4 {
+					if msg[:5] == "/list" {
+						var iterId uint64
+						var iterUsername string
+						list := "List of users in group\n"
+						counter := 1
+						rows, err := appDB.Raw("SELECT user_id, username FROM group_member_structs WHERE group_id = " + strconv.FormatUint(groupID, 10)).Rows()
+
+						if err != nil {
+							fmt.Println(err.Error())
+							return
+						}
+						for rows.Next() {
+							err = rows.Scan(&iterId, &iterUsername)
+							list += strconv.Itoa(counter) + ". "
+							if isOnline(iterId) {
+								list += " 🔵 "
+							} else {
+								list += " 🌑 "
+							}
+							list += iterUsername
+							if group.OwnerID == iterId {
+								list += " 👑"
+							}
+							list += "\n"
+							counter++
+						}
+						go sendSystemMessageToUserInGroup(&msgStruct{nil, list, true, groupID, 1}, clID)
+						continue
+					}
+				}
+
+				if len(msg) > 6 {
+
+					if msg[:6] == "/kick " {
+						username := msg[6:]
+
+						if group.OwnerID != clID {
+							go sendSystemMessageToUserInGroup(&msgStruct{nil, "You aren't owner of this group", true, groupID, 1}, clID)
+							continue
+						}
+
+						kickID, err := getUserIDbyName([]byte(username))
+						if err != nil {
+							go sendSystemMessageToUserInGroup(&msgStruct{nil, username + " is doesn't exists", true, groupID, 1}, clID)
+							continue
+						} else {
+							if kickID == clID {
+								go sendSystemMessageToUserInGroup(&msgStruct{nil, "You can't delete yourself, use /grant and then /leave", true, groupID, 1}, clID)
+								continue
+							}
+							appDB.First(&groupMem, "group_id = ? AND user_id = ?", groupID, kickID)
+							if groupMem.ID != 0 {
+								appDB.Delete(groupMemberStruct{}, "group_id = ? AND user_id = ?", groupID, kickID)
+								msgObj = msgStruct{nil, username + " was deleted from the group", true, groupID, 1}
+							} else {
+								go sendSystemMessageToUserInGroup(&msgStruct{nil, username + " not in group", true, groupID, 1}, clID)
+								continue
+							}
+						}
+					}
+				}
+				if len(msg) > 7 {
+					if msg[:7] == "/grant " {
+						username := msg[7:]
+
+						if group.OwnerID != clID {
+							go sendSystemMessageToUserInGroup(&msgStruct{nil, "You aren't owner of this group", true, groupID, 1}, clID)
+							continue
+						}
+						grantID, err := getUserIDbyName([]byte(username))
+						if err != nil {
+							go sendSystemMessageToUserInGroup(&msgStruct{nil, username + " is doesn't exists", true, groupID, 1}, clID)
+							continue
+						} else {
+							if grantID == clID {
+								go sendSystemMessageToUserInGroup(&msgStruct{nil, "You can't /grant to yourself", true, groupID, 1}, clID)
+								continue
+							} else {
+								appDB.First(&groupMem, "group_id = ? AND user_id = ?", groupID, grantID)
+								if groupMem.ID != 0 {
+									appDB.Model(&group).Update("owner_id", grantID)
+									msgObj = msgStruct{nil, username + " is now owner of the group", true, groupID, 1}
+								} else {
+									go sendSystemMessageToUserInGroup(&msgStruct{nil, username + " not in group", true, groupID, 1}, clID)
+									continue
+								}
 							}
 						}
 					}
@@ -592,10 +699,14 @@ func createGroup(clID uint64, buffer []byte, dataLen uint16) (uint64, error) { /
 	}
 	var group groupStruct
 	appDB.First(&group, "verbose = ?", groupName)
+	username, err := getNamebyUserID(clID)
+	if err != nil {
+		return 0, errors.New("500")
+	}
 	if reflect.DeepEqual(group, groupStruct{}) {
 		appDB.Create(&groupStruct{OwnerID: clID, Verbose: groupName})
 		appDB.First(&group, "verbose = ?", groupName)
-		appDB.Create(&groupMemberStruct{OwnerID: clID, UserID: clID, GroupID: group.ID})
+		appDB.Create(&groupMemberStruct{UserID: clID, GroupID: group.ID, Username: username})
 		return uint64(group.ID), nil
 	} else {
 		return 0, errors.New("409")
