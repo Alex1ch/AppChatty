@@ -60,12 +60,13 @@ var (
 	stickerScrollAdj float64
 	stickerScrollUpp float64
 
-	usernames  map[uint64]string
-	userids    map[string]uint64
-	groupnames map[uint64]string
-	chats      map[uint64]chat        // [user_id]chat struct
-	settings   map[string]string      // [key]value
-	stickerBuf map[string]*gdk.Pixbuf // [filename]pixbuf
+	usernames    map[uint64]string
+	userids      map[string]uint64
+	groupnames   map[uint64]string
+	chats        map[uint64]chat // [user_id]chat struct
+	newMCounters map[uint64]int
+	settings     map[string]string      // [key]value
+	stickerBuf   map[string]*gdk.Pixbuf // [filename]pixbuf
 
 	chatCount  uint64
 	online     bool
@@ -76,6 +77,7 @@ var (
 
 func main() {
 	chats = make(map[uint64]chat)
+	newMCounters = make(map[uint64]int)
 	settings = make(map[string]string)
 	usernames = make(map[uint64]string)
 	groupnames = make(map[uint64]string)
@@ -358,7 +360,6 @@ func initWindows() int {
 		}
 		redrawChat(activeChat, chatID)
 		activeChat = chatID
-
 	})
 
 	//
@@ -381,11 +382,14 @@ func initWindows() int {
 	}
 	addButton := obj.(*gtk.Button)
 	addButton.Connect("clicked", func() {
+		str, err := addContactEntry.GetText()
+		if str == "" {
+			return
+		}
 		if connection == nil {
 			popupError("Error: No connection", "Error")
 			return
 		}
-		str, err := addContactEntry.GetText()
 		if err != nil {
 			popupError("Error: "+err.Error(), "Error")
 			return
@@ -448,7 +452,9 @@ func initWindows() int {
 		err := createGroup()
 		if err != nil {
 			popupError("Error: "+err.Error(), "Error")
+			return
 		}
+		addGroupWin.Hide()
 	})
 
 	//
@@ -570,6 +576,9 @@ func readPacket(client net.Conn, timeout int64) (out_err error, dataLen uint16, 
 		client.SetReadDeadline(time.Now().Add(time.Duration(timeout * int64(time.Second))))
 	} else {
 		client.SetReadDeadline(time.Time{})
+	}
+	if client == nil {
+		return errors.New("No subscription available"), 0, 0, nil
 	}
 	dataLenB := make([]byte, 2)
 	_, err := client.Read(dataLenB)
@@ -826,12 +835,16 @@ func sendMessage(str string, clear bool) {
 			return
 		}
 
-		err, _, opCode, _ := readPacket(connection, 0)
+		err, _, opCode, _ := readPacket(connection, 5)
+		if err != nil {
+			popupError("Server is not responding", "Error")
+			return
+		}
 
 		switch opCode {
 		case 200:
-			row := createRow(clID, clUsername, str, chats[activeChat].group)
 			chatEntry := chats[activeChat]
+			row := createRow(clID, clUsername, str, false)
 			chatEntry.messages = append(chatEntry.messages, message{clID, clUsername, str, row})
 			chats[activeChat] = chatEntry
 
@@ -894,6 +907,10 @@ func addContact(isGroup int, contactName string, id uint64) error {
 func createGroup() error {
 	serial := createSerializer()
 	text, _ := groupNameEntry.GetText()
+
+	if text == "" {
+		return errors.New("Empty line")
+	}
 
 	err := serial.String(text, 1)
 	if err != nil {
@@ -1091,7 +1108,7 @@ func listenMessages() {
 				sendPacket(subscribtion, 400, nil)
 				break
 			}
-			_, err = parser.UInt64() //groupID
+			groupID, err := parser.UInt64() //groupID
 			if err != nil {
 				fmt.Printf("Error: " + err.Error())
 				sendPacket(subscribtion, 400, nil)
@@ -1109,8 +1126,8 @@ func listenMessages() {
 				sendPacket(subscribtion, 400, nil)
 				break
 			}
+			sendPacket(subscribtion, 200, nil)
 			if userID != 0 {
-				sendPacket(subscribtion, 200, nil)
 				username, err := getUsername(senderID)
 				if err != nil {
 					fmt.Printf("Error: " + err.Error())
@@ -1119,24 +1136,66 @@ func listenMessages() {
 				row := createRow(senderID, username, msg, false)
 				_, destChat := getChatByID(senderID, false)
 				if destChat.id == 0 {
-					if err != nil {
-						fmt.Printf("Error: " + err.Error())
-						break
-					}
 					chatCount++
 					addToContactLists(0, chatCount, senderID, username)
 				}
 				key, destChat := getChatByID(senderID, false)
 				destChat.messages = append(destChat.messages, message{senderID, username, msg, row})
-				chats[key] = destChat
 				if key == activeChat {
 					messageOutput.Add(row)
 					messageOutput.ShowAll()
 
 					glib.IdleAdd(scrollDown, nil)
+				} else {
+					newMCounters[key]++
+					crutch := chat{false, destChat.verbose + " (" + strconv.Itoa(newMCounters[key]) + ")", key, nil}
+					glib.IdleAdd(setContactText, crutch)
 				}
+				chats[key] = destChat
+			} else {
+				if senderID == clID {
+					break
+				}
+				username, err := getUsername(senderID)
+				if err != nil {
+					fmt.Printf("Error: " + err.Error())
+					break
+				}
+				groupname, err := getGroupname(groupID)
+				if err != nil {
+					fmt.Printf("Error: " + err.Error())
+					break
+				}
+				_, destChat := getChatByID(groupID, true)
+				if destChat.id == 0 {
+					chatCount++
+					addToContactLists(1, chatCount, groupID, groupname)
+				}
+				key, destChat := getChatByID(groupID, true)
+				var row *gtk.ListBoxRow
+				chatLen := len(destChat.messages)
+				if chatLen != 0 {
+					if destChat.messages[chatLen-1].senderID == senderID {
+						row = createRow(senderID, username, msg, false)
+					} else {
+						row = createRow(senderID, username, msg, true)
+					}
+				} else {
+					row = createRow(senderID, username, msg, true)
+				}
+				destChat.messages = append(destChat.messages, message{senderID, username, msg, row})
+				if key == activeChat {
+					messageOutput.Add(row)
+					messageOutput.ShowAll()
+
+					glib.IdleAdd(scrollDown, nil)
+				} else {
+					newMCounters[key]++
+					crutch := chat{false, destChat.verbose + " (" + strconv.Itoa(newMCounters[key]) + ")", key, nil}
+					glib.IdleAdd(setContactText, crutch)
+				}
+				chats[key] = destChat
 			}
-			sendPacket(subscribtion, 501, nil)
 		}
 	}
 }
@@ -1144,6 +1203,13 @@ func listenMessages() {
 //
 // etc
 //
+
+func setContactText(crutch chat) {
+	fmt.Print(crutch.id, crutch.verbose)
+	contact, _ := сontactsList.GetRowAtIndex(int(chatCount - crutch.id)).GetChild()
+	label := gtk.Label{*contact}
+	label.SetText(crutch.verbose)
+}
 
 func parseSettings() int {
 	settings["buffersize"] = "2048"
@@ -1222,6 +1288,11 @@ func redrawChat(prev, next uint64) { //, isPreviousChatGroup bool) {
 		fmt.Println(chatPrevMsg)
 	}
 
+	newMCounters[next] = 0
+
+	crutch := chat{false, chats[next].verbose, next, nil}
+	glib.IdleAdd(setContactText, crutch)
+
 	chatNextMsg := chats[next].messages
 
 	for i := range chatNextMsg {
@@ -1240,10 +1311,30 @@ func scrollDown() {
 	messageScroll.SetVAdjustment(adj)
 }
 
-func createRow(sender uint64, name string, str string, group bool) *gtk.ListBoxRow {
+func createRow(sender uint64, name string, str string, includeName bool) *gtk.ListBoxRow {
 	row, _ := gtk.ListBoxRowNew()
+	box, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
+
+	if includeName {
+		label, _ := gtk.LabelNew("")
+		label.SetXAlign(0)
+		label.SetMaxWidthChars(1)
+		label.SetLineWrap(true)
+		label.SetLineWrapMode(pango.WRAP_WORD_CHAR)
+		label.SetMarginTop(10)
+		label.SetMarginBottom(10)
+		label.SetMarginStart(20)
+		label.SetSelectable(true)
+		label.SetUseMarkup(true)
+		label.SetMarkup("<i><b>" + name + "</b></i>")
+		box.PackStart(label, true, true, 0)
+
+		label.SetXAlign(0)
+		row.SetMarginEnd(250)
+	}
+
 	if len(str) > 10 {
-		if str[0:9] == "/sticker:" && !group {
+		if str[0:9] == "/sticker:" {
 			var image *gtk.Image
 
 			if v, ok := stickerBuf[str[9:]]; ok {
@@ -1261,35 +1352,34 @@ func createRow(sender uint64, name string, str string, group bool) *gtk.ListBoxR
 					image.SetHAlign(gtk.ALIGN_START)
 					row.SetMarginEnd(250)
 				}
-				row.Add(image)
-
+				box.PackStart(image, true, true, 0)
+				row.Add(box)
 				return row
 			}
 		}
 	}
-	var label *gtk.Label
-	if group {
-		label, _ = gtk.LabelNew(name + ": " + str)
-	} else {
-		label, _ = gtk.LabelNew(str)
-	}
 
+	label, _ := gtk.LabelNew(str)
+
+	label.SetMaxWidthChars(1)
 	label.SetLineWrap(true)
 	label.SetLineWrapMode(pango.WRAP_WORD_CHAR)
-	label.SetMarginTop(12)
-	label.SetMarginBottom(12)
+	label.SetMarginTop(10)
+	label.SetMarginBottom(10)
+	label.SetMarginStart(20)
+	label.SetMarginEnd(20)
+	label.SetSelectable(true)
 
 	if sender != clID {
-		label.SetMarginStart(10)
 		label.SetXAlign(0)
 		row.SetMarginEnd(250)
 	} else {
-		label.SetMarginEnd(10)
 		label.SetXAlign(10000)
 		row.SetMarginStart(250)
 	}
 
-	row.Add(label)
+	box.PackStart(label, true, true, 0)
+	row.Add(box)
 	return row
 }
 
