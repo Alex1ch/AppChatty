@@ -1196,7 +1196,7 @@ func listenMessages() {
 				}
 				row := createRow(senderID, username, msg, false)
 				_, destChat := getChatByID(senderID, false)
-				if destChat != nil {
+				if destChat == nil {
 					chatCount++
 					addToContactLists(0, chatCount, senderID, username)
 				}
