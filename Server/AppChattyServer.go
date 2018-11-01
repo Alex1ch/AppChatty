@@ -90,7 +90,8 @@ func handlePacket(clID uint64, client net.Conn) {
 	)
 
 	for {
-		err, dataLen, opCode, buffer = readPacket(client, 60)
+		client.SetReadDeadline(time.Time{})
+		err, dataLen, opCode, buffer = readPacket(client, 0) // For some reason, timeout doesn't work
 		if err != nil {
 			log.Println(err.Error())
 			client.Close()
