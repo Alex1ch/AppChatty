@@ -90,7 +90,7 @@ func handlePacket(clID uint64, client net.Conn) {
 	)
 
 	for {
-		err, dataLen, opCode, buffer = readPacket(client, 0)
+		err, dataLen, opCode, buffer = readPacket(client, 60)
 		if err != nil {
 			log.Println(err.Error())
 			client.Close()
@@ -201,7 +201,7 @@ func handlePacket(clID uint64, client net.Conn) {
 					if msg[:5] == "/list" {
 						var iterId uint64
 						var iterUsername string
-						list := "List of users in group\n"
+						list := "List of users in group"
 						counter := 1
 						rows, err := appDB.Raw("SELECT user_id, username FROM group_member_structs WHERE group_id = " + strconv.FormatUint(groupID, 10)).Rows()
 
@@ -211,6 +211,7 @@ func handlePacket(clID uint64, client net.Conn) {
 						}
 						for rows.Next() {
 							err = rows.Scan(&iterId, &iterUsername)
+							list += "\n"
 							list += strconv.Itoa(counter) + ". "
 							if isOnline(iterId) {
 								list += " 🔵 "
@@ -221,7 +222,6 @@ func handlePacket(clID uint64, client net.Conn) {
 							if group.OwnerID == iterId {
 								list += " 👑"
 							}
-							list += "\n"
 							counter++
 						}
 						go sendSystemMessageToUserInGroup(&msgStruct{nil, list, true, groupID, 1}, clID)
@@ -250,8 +250,10 @@ func handlePacket(clID uint64, client net.Conn) {
 							}
 							appDB.First(&groupMem, "group_id = ? AND user_id = ?", groupID, kickID)
 							if groupMem.ID != 0 {
-								appDB.Delete(groupMemberStruct{}, "group_id = ? AND user_id = ?", groupID, kickID)
 								msgObj = msgStruct{nil, username + " was deleted from the group", true, groupID, 1}
+								go sendMessage(&msgObj)
+								appDB.Delete(groupMemberStruct{}, "group_id = ? AND user_id = ?", groupID, kickID)
+								continue
 							} else {
 								go sendSystemMessageToUserInGroup(&msgStruct{nil, username + " not in group", true, groupID, 1}, clID)
 								continue
@@ -352,6 +354,36 @@ func handlePacket(clID uint64, client net.Conn) {
 			serial := createSerializer()
 			serial.String(username, 1)
 			sendPacket(client, 200, serial.buffer.Bytes())
+		case 8:
+			parser := parserStruct{buffer, dataLen, 0}
+			idCount, err := parser.UInt16()
+			if err != nil {
+				continue
+			}
+			ids := make([]uint64, idCount)
+			var i uint16
+			for i = 0; i < idCount; i++ {
+				ids[i], err = parser.UInt64()
+				if err != nil {
+					continue
+				}
+			}
+			serial := createSerializer()
+			serial.UInt16(idCount)
+			for i = 0; i < idCount; i++ {
+				serial.UInt64(ids[i])
+				if err != nil {
+					continue
+				}
+				if isOnline(ids[i]) {
+					serial.Byte(1)
+				} else {
+					serial.Byte(0)
+				}
+			}
+
+			sendPacketToSubscriber(clID, 8, serial.buffer.Bytes())
+
 		default:
 		}
 	}
@@ -474,7 +506,7 @@ func handleSession(client net.Conn) {
 				id = uint64(user.ID)
 				subscription[id] = client
 				fmt.Println("Received subscribe from", username)
-				go sendHelloFromGroups(id)
+				go sendHelloFromGroup(id, 0)
 				break
 			} else {
 				sendPacket(client, 423, nil)
@@ -556,13 +588,13 @@ func readPacketFromSubscriber(id uint64, timeout int64) (out_err error, dataLen 
 	if !ok {
 		return errors.New("No subscription available"), 0, 0, nil
 	}
+	if client == nil {
+		return errors.New("No subscription available"), 0, 0, nil
+	}
 	if timeout != 0 {
 		client.SetReadDeadline(time.Now().Add(time.Duration(timeout * int64(time.Second))))
 	} else {
 		client.SetReadDeadline(time.Time{})
-	}
-	if client == nil {
-		return errors.New("No subscription available"), 0, 0, nil
 	}
 	dataLenB := make([]byte, 2)
 	_, err := client.Read(dataLenB)
@@ -677,8 +709,51 @@ func addUserToGroup() {
 
 }
 
-func sendHelloFromGroups(id uint64) {
+//0 - all groups
+func sendHelloFromGroup(id uint64, currentGroup uint64) {
+	if currentGroup == 0 {
+		var groupID uint64
+		var iterId uint64
+		var iterUsername string
+		rows, err := appDB.Raw("SELECT group_id FROM group_member_structs WHERE user_id = " + strconv.FormatUint(id, 10)).Rows()
 
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+		for rows.Next() {
+			err = rows.Scan(&groupID)
+			if err != nil {
+				fmt.Print(err.Error())
+			}
+			counter := 1
+			list := "Admin commands: /add /kick /grant\nCommon commands: /leave /list\nList of users in group"
+			rows1, err := appDB.Raw("SELECT user_id, username FROM group_member_structs WHERE group_id = " + strconv.FormatUint(groupID, 10)).Rows()
+
+			if err != nil {
+				fmt.Println(err.Error())
+				return
+			}
+			for rows1.Next() {
+				err = rows1.Scan(&iterId, &iterUsername)
+				list += "\n"
+				list += strconv.Itoa(counter) + ". "
+				if isOnline(iterId) {
+					list += " 🔵 "
+				} else {
+					list += " 🌑 "
+				}
+				list += iterUsername
+				counter++
+			}
+
+			go sendSystemMessageToUserInGroup(&msgStruct{nil, list, true, groupID, 1}, id)
+		}
+	} else {
+		list := "Admin commands: /add /kick /grant\nCommon commands: /leave /list"
+
+		go sendSystemMessageToUserInGroup(&msgStruct{nil, list, true, currentGroup, 1}, id)
+	}
 }
 
 //
@@ -707,6 +782,7 @@ func createGroup(clID uint64, buffer []byte, dataLen uint16) (uint64, error) { /
 		appDB.Create(&groupStruct{OwnerID: clID, Verbose: groupName})
 		appDB.First(&group, "verbose = ?", groupName)
 		appDB.Create(&groupMemberStruct{UserID: clID, GroupID: group.ID, Username: username})
+		sendHelloFromGroup(clID, group.ID)
 		return uint64(group.ID), nil
 	} else {
 		return 0, errors.New("409")
@@ -775,6 +851,7 @@ func sendMessage(msg *msgStruct) {
 		var userID uint64
 		rows, err := appDB.Raw("SELECT user_id FROM group_member_structs WHERE group_id = " + strconv.FormatUint(msg.ID, 10)).Rows()
 
+		var usersToSend []uint64
 		if err != nil {
 			fmt.Println(err.Error())
 			return
@@ -784,28 +861,39 @@ func sendMessage(msg *msgStruct) {
 			if err != nil {
 				fmt.Print(err.Error())
 			}
+			usersToSend = append(usersToSend, userID)
+		}
+
+		notInGroup := true
+		for i := range usersToSend {
+			if usersToSend[i] == msg.sender {
+				notInGroup = false
+				break
+			}
+		}
+		if msg.sender == 1 {
+			notInGroup = false
+		}
+
+		if notInGroup {
+			serial := createSerializer()
+			serial.UInt64(1)
+			serial.UInt64(0)
+			serial.UInt64(msg.ID)
+			serial.String("You are not the member of the group", 2)
+
+			sendPacketToSubscriber(msg.sender, 1, serial.buffer.Bytes())
+			return
+		}
+
+		for i := range usersToSend {
+			serial := createSerializer()
+			serial.UInt64(msg.sender)
 			serial.UInt64(0)
 			serial.UInt64(msg.ID)
 			serial.String(msg.message, 2)
 
-			err := sendPacketToSubscriber(userID, 1, serial.buffer.Bytes())
-
-			err, _, opCode, _ := readPacketFromSubscriber(msg.ID, 0)
-			if err != nil {
-				fmt.Println(err.Error())
-				continue
-			}
-
-			switch opCode {
-			case 200:
-				continue
-			case 400:
-				fmt.Println("Bad syntax???")
-			case 404:
-				fmt.Println("Wrong receipient")
-			default:
-				fmt.Println("Unknown response")
-			}
+			sendPacketToSubscriber(usersToSend[i], 1, serial.buffer.Bytes())
 		}
 		return
 	}

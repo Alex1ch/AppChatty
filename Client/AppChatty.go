@@ -33,6 +33,7 @@ type chat struct {
 	verbose  string
 	id       uint64
 	messages []message
+	online   bool
 }
 
 var (
@@ -63,7 +64,7 @@ var (
 	usernames    map[uint64]string
 	userids      map[string]uint64
 	groupnames   map[uint64]string
-	chats        map[uint64]chat // [user_id]chat struct
+	chats        map[uint64]*chat // [user_id]chat struct
 	newMCounters map[uint64]int
 	settings     map[string]string      // [key]value
 	stickerBuf   map[string]*gdk.Pixbuf // [filename]pixbuf
@@ -76,7 +77,7 @@ var (
 )
 
 func main() {
-	chats = make(map[uint64]chat)
+	chats = make(map[uint64]*chat)
 	newMCounters = make(map[uint64]int)
 	settings = make(map[string]string)
 	usernames = make(map[uint64]string)
@@ -102,6 +103,7 @@ func main() {
 	connectToServer()
 
 	go gtk.Main()
+	go onlineChecker()
 	listenMessages()
 }
 
@@ -887,14 +889,14 @@ func addContact(isGroup int, contactName string, id uint64) error {
 			return errors.New("It's you!")
 		}
 		_, oldChat := getChatByID(id, false)
-		if oldChat.id != 0 {
+		if oldChat != nil {
 			return errors.New("User already in contacts")
 		}
 		chatCount++
 		addToContactLists(isGroup, chatCount, id, contactName)
 	} else {
 		_, oldChat := getChatByID(id, true)
-		if oldChat.id != 0 {
+		if oldChat != nil {
 			return errors.New("Group chat already in contacts")
 		}
 
@@ -1086,7 +1088,10 @@ func listenMessages() {
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		log.Println("Listen for msg's")
+		if subscribtion == nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
 		err, dataLen, opCode, data = readPacket(subscribtion, 0)
 		if err != nil {
 			log.Println("Error: Subscription fail")
@@ -1099,34 +1104,28 @@ func listenMessages() {
 			senderID, err := parser.UInt64()
 			if err != nil {
 				fmt.Printf("Error: " + err.Error())
-				sendPacket(subscribtion, 400, nil)
 				break
 			}
 			userID, err := parser.UInt64()
 			if err != nil {
 				fmt.Printf("Error: " + err.Error())
-				sendPacket(subscribtion, 400, nil)
 				break
 			}
 			groupID, err := parser.UInt64() //groupID
 			if err != nil {
 				fmt.Printf("Error: " + err.Error())
-				sendPacket(subscribtion, 400, nil)
 				break
 			}
 			mLen, err := parser.UInt16()
 			if err != nil {
 				fmt.Printf("Error: " + err.Error())
-				sendPacket(subscribtion, 400, nil)
 				break
 			}
 			msg, err := parser.String(mLen)
 			if err != nil {
 				fmt.Printf("Error: " + err.Error())
-				sendPacket(subscribtion, 400, nil)
 				break
 			}
-			sendPacket(subscribtion, 200, nil)
 			if userID != 0 {
 				username, err := getUsername(senderID)
 				if err != nil {
@@ -1135,7 +1134,7 @@ func listenMessages() {
 				}
 				row := createRow(senderID, username, msg, false)
 				_, destChat := getChatByID(senderID, false)
-				if destChat.id == 0 {
+				if destChat != nil {
 					chatCount++
 					addToContactLists(0, chatCount, senderID, username)
 				}
@@ -1148,8 +1147,7 @@ func listenMessages() {
 					glib.IdleAdd(scrollDown, nil)
 				} else {
 					newMCounters[key]++
-					crutch := chat{false, destChat.verbose + " (" + strconv.Itoa(newMCounters[key]) + ")", key, nil}
-					glib.IdleAdd(setContactText, crutch)
+					glib.IdleAdd(setContactText, chat{destChat.group, destChat.verbose, key, make([]message, 0), destChat.online})
 				}
 				chats[key] = destChat
 			} else {
@@ -1167,7 +1165,7 @@ func listenMessages() {
 					break
 				}
 				_, destChat := getChatByID(groupID, true)
-				if destChat.id == 0 {
+				if destChat == nil {
 					chatCount++
 					addToContactLists(1, chatCount, groupID, groupname)
 				}
@@ -1191,10 +1189,40 @@ func listenMessages() {
 					glib.IdleAdd(scrollDown, nil)
 				} else {
 					newMCounters[key]++
-					crutch := chat{false, destChat.verbose + " (" + strconv.Itoa(newMCounters[key]) + ")", key, nil}
-					glib.IdleAdd(setContactText, crutch)
+					glib.IdleAdd(setContactText, chat{destChat.group, destChat.verbose, key, make([]message, 0), destChat.online})
 				}
 				chats[key] = destChat
+			}
+		case 8:
+			parser := parserStruct{data, dataLen, 0}
+			idCount, err := parser.UInt16()
+			if err != nil {
+				continue
+			}
+			var id uint64
+			var i uint16
+			var online byte
+			for i = 0; i < idCount; i++ {
+				id, err = parser.UInt64()
+				if err != nil {
+					continue
+				}
+
+				online, err = parser.Byte()
+				if err != nil {
+					continue
+				}
+
+				key, destChat := getChatByID(id, false)
+				if destChat == nil {
+					continue
+				}
+				if online == 1 {
+					destChat.online = true
+				} else {
+					destChat.online = false
+				}
+				glib.IdleAdd(setContactText, chat{destChat.group, destChat.verbose, key, make([]message, 0), destChat.online})
 			}
 		}
 	}
@@ -1204,11 +1232,55 @@ func listenMessages() {
 // etc
 //
 
+func onlineChecker() {
+	for {
+		if !online {
+			if !gtkAlive {
+				return
+			}
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		time.Sleep(5 * time.Second)
+		ids := make([]uint64, 0)
+		for _, value := range chats {
+			if value.group == false {
+				ids = append(ids, value.id)
+			}
+		}
+		glib.IdleAdd(checkOnline, ids)
+	}
+}
+
+func checkOnline(ids []uint64) {
+	serial := createSerializer()
+	serial.UInt16(uint16(len(ids)))
+	var i uint16
+	for i = 0; i < uint16(len(ids)); i++ {
+		serial.UInt64(ids[i])
+	}
+	if connection == nil {
+		return
+	}
+	sendPacket(connection, 8, serial.buffer.Bytes())
+}
+
 func setContactText(crutch chat) {
 	fmt.Print(crutch.id, crutch.verbose)
 	contact, _ := сontactsList.GetRowAtIndex(int(chatCount - crutch.id)).GetChild()
 	label := gtk.Label{*contact}
-	label.SetText(crutch.verbose)
+	str := crutch.verbose
+	if !crutch.group {
+		if crutch.online {
+			str += " 🔵"
+		} else {
+			str += " 🌑"
+		}
+	}
+	if newMCounters[crutch.id] != 0 {
+		str += " (" + strconv.Itoa(newMCounters[crutch.id]) + ")"
+	}
+	label.SetText(str)
 }
 
 func parseSettings() int {
@@ -1259,9 +1331,9 @@ func addToContactLists(isGroup int, chatID, ID uint64, verbose string) {
 	row, _ := gtk.ListBoxRowNew()
 
 	if isGroup == 0 {
-		chats[chatID] = chat{false, verbose, ID, make([]message, 0)}
+		chats[chatID] = &chat{false, verbose, ID, make([]message, 0), false}
 	} else {
-		chats[chatID] = chat{true, verbose, ID, make([]message, 0)}
+		chats[chatID] = &chat{true, verbose, ID, make([]message, 0), false}
 	}
 
 	label, _ := gtk.LabelNew(verbose)
@@ -1272,6 +1344,7 @@ func addToContactLists(isGroup int, chatID, ID uint64, verbose string) {
 	row.SetName(strconv.Itoa(isGroup) + " " + strconv.FormatUint(chatID, 10))
 
 	сontactsList.Insert(row, 0)
+	glib.IdleAdd(setContactText, chat{chats[chatID].group, chats[chatID].verbose, chatID, make([]message, 0), chats[chatID].online})
 	сontactsList.ShowAll()
 }
 
@@ -1290,8 +1363,7 @@ func redrawChat(prev, next uint64) { //, isPreviousChatGroup bool) {
 
 	newMCounters[next] = 0
 
-	crutch := chat{false, chats[next].verbose, next, nil}
-	glib.IdleAdd(setContactText, crutch)
+	glib.IdleAdd(setContactText, chat{chats[next].group, chats[next].verbose, next, make([]message, 0), chats[next].online})
 
 	chatNextMsg := chats[next].messages
 
@@ -1461,13 +1533,13 @@ func scanStickers() {
 	}
 }
 
-func getChatByID(id uint64, isGroup bool) (uint64, chat) {
+func getChatByID(id uint64, isGroup bool) (uint64, *chat) {
 	for k, v := range chats {
 		if v.id == id && v.group == isGroup {
 			return k, v
 		}
 	}
-	return 0, chat{}
+	return 0, nil
 }
 
 //

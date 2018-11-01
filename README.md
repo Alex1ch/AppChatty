@@ -60,6 +60,17 @@ Response 404 or 200 with data:
 - nameLen `byte`
 - name `utf8` 
 
+#### 8: Check Online. Data:
+- UsersCount `uint`
+- UserID `uint64`
+...
+
+Response 8 with data on the subscription:
+- UsersCount `uint16`
+- UserID `uint64`
+- Online `byte`
+...
+
 #### 10: Subscription Connection. Data:
 - NameLen `byte`
 - Name `utf8`
