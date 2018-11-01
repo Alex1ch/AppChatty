@@ -56,6 +56,8 @@ var (
 	stickerList    *gtk.ListBox
 	stickerScroll  *gtk.ScrolledWindow
 	groupNameEntry *gtk.Entry
+	ipEntry        *gtk.Entry
+	portEntry      *gtk.Entry
 	usernameLabel  *gtk.Label
 
 	stickerScrollAdj float64
@@ -157,6 +159,8 @@ func initWindows() int {
 	}
 	settingsBtn := obj.(*gtk.EventBox)
 	settingsBtn.Connect("button-release-event", func() {
+		ipEntry.SetText(settings["ip"])
+		portEntry.SetText(settings["port"])
 		settingsWin.ShowAll()
 	})
 
@@ -199,6 +203,64 @@ func initWindows() int {
 		log.Fatal("Error in object getting:", err)
 		return 2
 	}
+
+	//
+	// IpEntry
+	//
+	obj, err = builder.GetObject("IP")
+	if err != nil {
+		log.Fatal("Error in object getting:", err)
+		return 2
+	}
+	ipEntry = obj.(*gtk.Entry)
+
+	//
+	// Port Entry
+	//
+	obj, err = builder.GetObject("PORT")
+	if err != nil {
+		log.Fatal("Error in object getting:", err)
+		return 2
+	}
+	portEntry = obj.(*gtk.Entry)
+
+	//
+	//Settings OK button
+	//
+	obj, err = builder.GetObject("Settings OK")
+	if err != nil {
+		log.Fatal("Error:", err)
+		return 2
+	}
+	setOKBtn := obj.(*gtk.Button)
+	setOKBtn.Connect("clicked", func() {
+		ip, err := ipEntry.GetText()
+		if err != nil {
+			return
+		}
+		port, err := portEntry.GetText()
+		if err != nil {
+			return
+		}
+		if net.ParseIP(ip) != nil {
+			settings["ip"] = ip
+		} else {
+			popupError("Wrong IP format", "Error")
+			return
+		}
+		i, err := strconv.Atoi(port)
+		if err == nil {
+			if i > 0 && i < 65536 {
+				settings["port"] = port
+				settingsWin.Hide()
+			} else {
+				popupError("Wrong PORT range", "Error")
+			}
+		} else {
+			popupError("Wrong PORT format", "Error")
+		}
+
+	})
 
 	//
 	//Send button
@@ -687,7 +749,7 @@ func sendRegisterOrAuthAndSubscribe(username, password string, auth bool) error 
 		return err
 	}
 
-	err, _, opCode, _ := readPacket(connection, 5)
+	err, _, opCode, _ := readPacket(connection, 2)
 	if err != nil {
 		return errors.New("Server not responding")
 	}
