@@ -1,6 +1,8 @@
 # AppChatty
 Chat for DS Lab (SNE)
 
+![](https://i.imgur.com/OSuhJiC.png)
+
 ## Technology stack:
 - Golang
 - GTK3+ (gotk3)
